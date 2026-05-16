@@ -9,6 +9,56 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local mouse = player:GetMouse()
 
+local function NewJanitor()
+	local janitor = {items = {}}
+	function janitor:Add(task)
+		self.items[#self.items + 1] = task
+		return task
+	end
+	function janitor:Cleanup()
+		for i = #self.items, 1, -1 do
+			local item = self.items[i]
+			if typeof(item) == "RBXScriptConnection" then
+				if item.Connected then item:Disconnect() end
+			elseif typeof(item) == "Instance" and item:IsA("Tween") then
+				item:Cancel()
+			elseif type(item) == "thread" then
+				task.cancel(item)
+			elseif type(item) == "function" then
+				item()
+			elseif type(item) == "table" and item.Cancel then
+				item:Cancel()
+			end
+			self.items[i] = nil
+		end
+	end
+	return janitor
+end
+
+local ControllerJanitor = NewJanitor()
+local CharacterJanitor = NewJanitor()
+
+local function TrackConnect(signal, fn, janitor)
+	local c = signal:Connect(fn)
+	(janitor or ControllerJanitor):Add(c)
+	return c
+end
+
+local function TrackSpawn(fn, janitor)
+	local cancelled = false
+	local handle = {IsCancelled = function() return cancelled end}
+	local th
+	handle.Cancel = function()
+		if cancelled then return end
+		cancelled = true
+		if th then task.cancel(th) end
+	end
+	th = task.spawn(function() fn(handle) end)
+	(janitor or ControllerJanitor):Add(handle)
+	return handle
+end
+
+
 ------------------------------------------------------------------------
 -- THEME - Dark Industrial / Cyberpunk feel, NOT generic AI pastels
 ------------------------------------------------------------------------
@@ -71,6 +121,7 @@ end
 
 local function Tw(obj,props,dur,style)
 	local tw = TweenService:Create(obj, TweenInfo.new(dur or 0.25, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props)
+	ControllerJanitor:Add(tw)
 	tw:Play(); return tw
 end
 
@@ -121,6 +172,11 @@ end
 ------------------------------------------------------------------------
 -- SCREEN GUI - DisplayOrder high, IgnoreGuiInset, Modal where needed
 ------------------------------------------------------------------------
+local existingGui = player.PlayerGui:FindFirstChild("WeaponEditorV2")
+if existingGui then
+	existingGui:Destroy()
+end
+
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "WeaponEditorV2"
 Gui.ResetOnSpawn = false
@@ -159,8 +215,8 @@ waitText.TextXAlignment = Enum.TextXAlignment.Left
 waitText.Parent = WaitFrame
 
 -- pulse the bar
-spawn(function()
-	while Gui.Parent do
+TrackSpawn(function(loop)
+	while Gui.Parent and not loop.IsCancelled() do
 		Tw(waitBar,{BackgroundTransparency=0.7},0.8)
 		task.wait(0.8)
 		Tw(waitBar,{BackgroundTransparency=0},0.8)
@@ -1238,13 +1294,21 @@ end
 
 local function SetupChar(char)
 	character = char
-	char.ChildAdded:Connect(function(ch) if ch:IsA("Tool") then OnEquip(ch) end end)
-	char.ChildRemoved:Connect(function(ch) if ch:IsA("Tool") then OnUnequip(ch) end end)
+	TrackConnect(char.ChildAdded, function(ch) if ch:IsA("Tool") then OnEquip(ch) end end, CharacterJanitor)
+	TrackConnect(char.ChildRemoved, function(ch) if ch:IsA("Tool") then OnUnequip(ch) end end, CharacterJanitor)
 	for _,ch in ipairs(char:GetChildren()) do if ch:IsA("Tool") then OnEquip(ch); break end end
 end
 
 SetupChar(character)
-player.CharacterAdded:Connect(SetupChar)
+TrackConnect(player.CharacterAdded, function(newChar)
+	CharacterJanitor:Cleanup()
+	SetupChar(newChar)
+end)
+TrackConnect(player.CharacterRemoving, function()
+	CharacterJanitor:Cleanup()
+	State.tool = nil
+	State.parts = {}
+end)
 
 ------------------------------------------------------------------------
 -- BUTTON EVENTS
@@ -1274,7 +1338,7 @@ btnUndo.MouseButton1Click:Connect(function() Undo() end)
 -- ANIMATION LOOP
 ------------------------------------------------------------------------
 local t = 0
-RunService.Heartbeat:Connect(function(dt)
+TrackConnect(RunService.Heartbeat, function(dt)
 	t += dt
 	if not State.tool then return end
 	local parts = GetParts()
@@ -1322,7 +1386,7 @@ end)
 ------------------------------------------------------------------------
 -- KEYBINDS
 ------------------------------------------------------------------------
-UserInputService.InputBegan:Connect(function(input, gpe)
+TrackConnect(UserInputService.InputBegan, function(input, gpe)
 	if gpe then return end
 	if input.KeyCode == Enum.KeyCode.F7 then
 		if Main.Visible then
@@ -1354,3 +1418,9 @@ print("════════════════════════�
 print("  ⚔  WEAPON EDITOR v2.0 LOADED")
 print("  Equip a tool · F7 toggle · Ctrl+Z undo")
 print("══════════════════════════════════")
+
+
+TrackConnect(Gui.Destroying, function()
+	CharacterJanitor:Cleanup()
+	ControllerJanitor:Cleanup()
+end)
