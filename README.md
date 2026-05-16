@@ -2,11 +2,34 @@
 
 ## Script Naming & Domain Standard
 
-Top-level scripts are organized by feature domain directories, and every runnable Roblox script follows:
+Top-level scripts are organized by feature-domain directories, and every runnable Roblox script follows:
 
-- `PascalCase` or `snake_case` descriptive names with functional intent.
+- `PascalCase` or `snake_case` descriptive names with clear functional intent.
 - Execution-context suffixes: `.client.lua` for LocalScripts and `.server.lua` for server scripts.
-- Versioned naming for functionally overlapping scripts.
+- Explicit version labels when multiple scripts intentionally overlap in feature scope.
+
+## Domain Layout
+
+- `ai/`
+- `animation/`
+- `combat/`
+- `fishing/`
+- `ui/`
+- `experimental/`
+
+## Legacy Name → Canonical Name Map
+
+| Legacy Root Script | Canonical Script Path | Domain Rationale |
+|---|---|---|
+| `Maj` | `ai/AIFriendCompanion.client.lua` | AI companion behavior |
+| `De` | `ai/MitralAIPlayerController.client.lua` | AI player-control experimentation |
+| `Emo` | `animation/EmoteAnimationOverride.client.lua` | Character animation override |
+| `Rezy` | `animation/EmoteAnimationRuntimeOverride.client.lua` | Runtime animation override UI |
+| `U` | `combat/VenomMovesetController.client.lua` | Combat moveset system |
+| `Weapon editor` | `fishing/OverengineeredFishingSystem.client.lua` | File content is fishing gameplay despite legacy name |
+| `Just a guy fishing` | `ui/WeaponEditorExperimental.client.lua` | File content is an experimental weapon editor UI |
+| `Edit` | `ui/WeaponEditorV2.client.lua` | Main supported weapon editor |
+| `Nah` | `experimental/NexusMindController.client.lua` | Quarantined high-autonomy prototype |
 
 ## Script Manifest
 
@@ -29,4 +52,4 @@ Two weapon editor scripts are retained intentionally with explicit versioning:
 - `ui/WeaponEditorV2.client.lua`: **primary** supported editor.
 - `ui/WeaponEditorExperimental.client.lua`: **experimental** branch for feature trials.
 
-Deprecation note: if functionality converges, deprecate `WeaponEditorExperimental` in favor of `WeaponEditorV2` and keep compatibility notes in this README before removal.
+Deprecation note: if functionality converges, deprecate `WeaponEditorExperimental` in favor of `WeaponEditorV2`, add migration notes here, then remove only after one full release cycle.
