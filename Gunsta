@@ -1,0 +1,1983 @@
+-- THE NPC MASTER - StarterPlayerScript
+-- Complete NPC Control System with Custom Animations, Guns, and NPC Manipulation
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local ContentProvider = game:GetService("ContentProvider")
+
+local Player = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local Camera = Workspace.CurrentCamera
+
+-- Wait for character to fully load
+repeat task.wait() until Character:FindFirstChild("Head")
+
+local Head = Character:WaitForChild("Head")
+local Torso = Character:FindFirstChild("Torso") or Character:FindFirstChild("UpperTorso")
+local LeftArm = Character:FindFirstChild("Left Arm") or Character:FindFirstChild("LeftUpperArm")
+local RightArm = Character:FindFirstChild("Right Arm") or Character:FindFirstChild("RightUpperArm")
+
+-- =============================================
+-- GLOBAL STATE
+-- =============================================
+local frozenNPCs = {} -- NPCs frozen locally
+local loyalistNPCs = {} -- NPCs converted to loyalists
+local mountedNPC = nil -- Currently mounted NPC
+local isMounted = false
+local currentGun = nil
+local currentGunIndex = 1
+local isEquipped = false
+local guns = {}
+local gunModels = {}
+local frameCounter = 0
+local stopMotionFrame = 0
+local STOPMOTION_RATE = 0.08 -- frames per second style
+
+-- =============================================
+-- STOPMTION ANIMATION SYSTEM
+-- =============================================
+local AnimationController = {}
+
+local customAnimations = {
+    idle = {
+        frames = {
+            {torsoRotY = 0, headTilt = 0, armL = -15, armR = -15},
+            {torsoRotY = 2, headTilt = 3, armL = -12, armR = -18},
+            {torsoRotY = -1, headTilt = -2, armL = -17, armR = -13},
+            {torsoRotY = 3, headTilt = 1, armL = -14, armR = -16},
+            {torsoRotY = 0, headTilt = 0, armL = -15, armR = -15},
+        },
+        speed = 0.12
+    },
+    walk = {
+        frames = {
+            {torsoRotY = 0, headTilt = 0, armL = 30, armR = -30, legL = 25, legR = -25},
+            {torsoRotY = 5, headTilt = 2, armL = 15, armR = -5, legL = 10, legR = -10},
+            {torsoRotY = 0, headTilt = 0, armL = -30, armR = 30, legL = -25, legR = 25},
+            {torsoRotY = -5, headTilt = -2, armL = -5, armR = 15, legL = -10, legR = 10},
+        },
+        speed = 0.06
+    },
+    shoot = {
+        frames = {
+            {torsoRotY = 0, headTilt = 0, armR = 90, armL = 60, recoil = 0},
+            {torsoRotY = -5, headTilt = 5, armR = 95, armL = 65, recoil = -15},
+            {torsoRotY = -8, headTilt = 8, armR = 85, armL = 55, recoil = -25},
+            {torsoRotY = -5, headTilt = 5, armR = 90, armL = 60, recoil = -10},
+            {torsoRotY = 0, headTilt = 0, armR = 90, armL = 60, recoil = 0},
+        },
+        speed = 0.04
+    },
+    mount = {
+        frames = {
+            {torsoRotY = 0, headTilt = -10, armL = 45, armR = 45},
+            {torsoRotY = 3, headTilt = -8, armL = 50, armR = 42},
+            {torsoRotY = -3, headTilt = -12, armL = 40, armR = 48},
+            {torsoRotY = 0, headTilt = -10, armL = 45, armR = 45},
+        },
+        speed = 0.1
+    }
+}
+
+local currentAnim = "idle"
+local currentFrame = 1
+local frameTimer = 0
+local isShootAnim = false
+
+-- =============================================
+-- MOTOR6D SETUP FOR CUSTOM ANIMATIONS
+-- =============================================
+local function getMotor(part0, part1)
+    for _, v in pairs(part0:GetChildren()) do
+        if v:IsA("Motor6D") and v.Part1 == part1 then
+            return v
+        end
+    end
+    return nil
+end
+
+local motors = {}
+
+local function setupMotors()
+    if not Character then return end
+    
+    local root = Character:FindFirstChild("HumanoidRootPart")
+    local torso = Character:FindFirstChild("Torso") or Character:FindFirstChild("UpperTorso")
+    local head = Character:FindFirstChild("Head")
+    local leftArm = Character:FindFirstChild("Left Arm") or Character:FindFirstChild("LeftUpperArm")
+    local rightArm = Character:FindFirstChild("Right Arm") or Character:FindFirstChild("RightUpperArm")
+    local leftLeg = Character:FindFirstChild("Left Leg") or Character:FindFirstChild("LeftUpperLeg")
+    local rightLeg = Character:FindFirstChild("Right Leg") or Character:FindFirstChild("RightUpperLeg")
+    
+    if torso then motors.neck = getMotor(torso, head) end
+    if torso then motors.leftShoulder = getMotor(torso, leftArm) end
+    if torso then motors.rightShoulder = getMotor(torso, rightArm) end
+    if torso then motors.leftHip = getMotor(torso, leftLeg) end
+    if torso then motors.rightHip = getMotor(torso, rightLeg) end
+    if root then motors.rootJoint = getMotor(root, torso) end
+end
+
+setupMotors()
+
+-- =============================================
+-- LIP SYNC STOPMOTION SYSTEM
+-- =============================================
+local lipFrames = {
+    {scaleY = 1.0, scaleX = 1.0},
+    {scaleY = 1.3, scaleX = 1.1},
+    {scaleY = 0.8, scaleX = 1.2},
+    {scaleY = 1.5, scaleX = 0.9},
+    {scaleY = 1.0, scaleX = 1.0},
+    {scaleY = 0.7, scaleX = 1.3},
+    {scaleY = 1.2, scaleX = 1.0},
+}
+
+local isTalking = false
+local lipFrame = 1
+local lipTimer = 0
+local LIP_SPEED = 0.09
+
+-- Create mouth decal on head
+local mouthGui = Instance.new("BillboardGui")
+mouthGui.Size = UDim2.new(1.5, 0, 0.5, 0)
+mouthGui.StudsOffset = Vector3.new(0, -0.4, 0.51)
+mouthGui.AlwaysOnTop = false
+mouthGui.Parent = Head
+
+local mouthFrame = Instance.new("Frame")
+mouthFrame.Size = UDim2.new(0.5, 0, 0.4, 0)
+mouthFrame.Position = UDim2.new(0.25, 0, 0.3, 0)
+mouthFrame.BackgroundColor3 = Color3.fromRGB(20, 10, 10)
+mouthFrame.BorderSizePixel = 2
+mouthFrame.Parent = mouthGui
+
+local mouthInner = Instance.new("Frame")
+mouthInner.Size = UDim2.new(0.8, 0, 0.6, 0)
+mouthInner.Position = UDim2.new(0.1, 0, 0.2, 0)
+mouthInner.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+mouthInner.Parent = mouthFrame
+
+local function updateLipSync(dt)
+    lipTimer = lipTimer + dt
+    if lipTimer >= LIP_SPEED then
+        lipTimer = 0
+        lipFrame = lipFrame % #lipFrames + 1
+        local lf = lipFrames[lipFrame]
+        
+        if isTalking then
+            mouthFrame.Size = UDim2.new(0.5 * lf.scaleX, 0, 0.4 * lf.scaleY, 0)
+            mouthInner.BackgroundColor3 = Color3.fromRGB(
+                200 + math.random(-20, 20),
+                50 + math.random(-10, 10),
+                50 + math.random(-10, 10)
+            )
+        else
+            mouthFrame.Size = UDim2.new(0.5, 0, 0.15, 0)
+        end
+    end
+end
+
+-- Start talking periodically to simulate NPC master commanding
+task.spawn(function()
+    while true do
+        task.wait(math.random(3, 8))
+        isTalking = true
+        task.wait(math.random(1, 3))
+        isTalking = false
+    end
+end)
+
+-- =============================================
+-- STOPMOTION BODY ANIMATION UPDATE
+-- =============================================
+local function applyStopMotionFrame(frameName, frameIndex)
+    local animData = customAnimations[frameName]
+    if not animData then return end
+    
+    local frames = animData.frames
+    if not frames or #frames == 0 then return end
+    
+    local fi = ((frameIndex - 1) % #frames) + 1
+    local frame = frames[fi]
+    
+    if motors.neck and frame.headTilt then
+        motors.neck.C0 = CFrame.new(0, 1, 0) * CFrame.Angles(
+            math.rad(frame.headTilt or 0),
+            math.rad((frame.headRotY or 0)),
+            0
+        )
+    end
+    
+    if motors.leftShoulder and frame.armL then
+        motors.leftShoulder.C0 = CFrame.new(-1, 0.5, 0) * CFrame.Angles(
+            math.rad(frame.armL or 0),
+            0,
+            math.rad(-5)
+        )
+    end
+    
+    if motors.rightShoulder and frame.armR then
+        local recoilVal = frame.recoil or 0
+        motors.rightShoulder.C0 = CFrame.new(1, 0.5, 0) * CFrame.Angles(
+            math.rad((frame.armR or 0) + recoilVal),
+            0,
+            math.rad(5)
+        )
+    end
+    
+    if motors.leftHip and frame.legL then
+        motors.leftHip.C0 = CFrame.new(-1, -1, 0) * CFrame.Angles(
+            math.rad(frame.legL or 0),
+            0, 0
+        )
+    end
+    
+    if motors.rightHip and frame.legR then
+        motors.rightHip.C0 = CFrame.new(1, -1, 0) * CFrame.Angles(
+            math.rad(frame.legR or 0),
+            0, 0
+        )
+    end
+    
+    if motors.rootJoint and frame.torsoRotY then
+        motors.rootJoint.C0 = CFrame.new(0, 0, 0) * CFrame.Angles(
+            0,
+            math.rad(frame.torsoRotY or 0),
+            0
+        )
+    end
+end
+
+-- =============================================
+-- GUN CREATION SYSTEM
+-- =============================================
+
+-- GUN 1: FREEZE GUN (Crystal/Ice themed)
+local function createFreezeGun()
+    local gun = Instance.new("Model")
+    gun.Name = "FreezeGun"
+    
+    -- Main body
+    local body = Instance.new("Part")
+    body.Name = "Handle"
+    body.Size = Vector3.new(0.35, 0.35, 1.2)
+    body.BrickColor = BrickColor.new("Cyan")
+    body.Material = Enum.Material.Glass
+    body.CastShadow = true
+    body.Parent = gun
+    
+    -- Crystal barrel
+    local barrel = Instance.new("Part")
+    barrel.Name = "Barrel"
+    barrel.Size = Vector3.new(0.2, 0.2, 0.9)
+    barrel.BrickColor = BrickColor.new("White")
+    barrel.Material = Enum.Material.Neon
+    barrel.CastShadow = false
+    barrel.Parent = gun
+    
+    local barrelWeld = Instance.new("WeldConstraint")
+    barrelWeld.Part0 = body
+    barrelWeld.Part1 = barrel
+    barrelWeld.Parent = gun
+    barrel.CFrame = body.CFrame * CFrame.new(0, 0.1, -1.0)
+    
+    -- Crystal tip
+    local tip = Instance.new("SpecialMesh")
+    tip.MeshType = Enum.MeshType.Wedge
+    tip.Scale = Vector3.new(0.8, 0.8, 0.8)
+    tip.Parent = barrel
+    
+    -- Side crystals
+    for i = 1, 4 do
+        local crystal = Instance.new("Part")
+        crystal.Size = Vector3.new(0.08, 0.25, 0.08)
+        crystal.BrickColor = BrickColor.new("Cyan")
+        crystal.Material = Enum.Material.Neon
+        crystal.CastShadow = false
+        crystal.Parent = gun
+        
+        local crystalMesh = Instance.new("SpecialMesh")
+        crystalMesh.MeshType = Enum.MeshType.Diamond
+        crystalMesh.Parent = crystal
+        
+        local crystalWeld = Instance.new("WeldConstraint")
+        crystalWeld.Part0 = body
+        crystalWeld.Part1 = crystal
+        crystalWeld.Parent = gun
+        
+        local angle = (i / 4) * math.pi * 2
+        crystal.CFrame = body.CFrame * CFrame.new(
+            math.cos(angle) * 0.22,
+            math.sin(angle) * 0.22,
+            -0.3
+        )
+    end
+    
+    -- Grip
+    local grip = Instance.new("Part")
+    grip.Size = Vector3.new(0.25, 0.5, 0.3)
+    grip.BrickColor = BrickColor.new("Dark blue")
+    grip.Material = Enum.Material.SmoothPlastic
+    grip.Parent = gun
+    
+    local gripWeld = Instance.new("WeldConstraint")
+    gripWeld.Part0 = body
+    gripWeld.Part1 = grip
+    gripWeld.Parent = gun
+    grip.CFrame = body.CFrame * CFrame.new(0, -0.4, 0.3)
+    
+    -- Glowing core
+    local core = Instance.new("Part")
+    core.Size = Vector3.new(0.15, 0.15, 0.8)
+    core.BrickColor = BrickColor.new("Toothpaste")
+    core.Material = Enum.Material.Neon
+    core.CastShadow = false
+    core.Parent = gun
+    
+    local coreWeld = Instance.new("WeldConstraint")
+    coreWeld.Part0 = body
+    coreWeld.Part1 = core
+    coreWeld.Parent = gun
+    core.CFrame = body.CFrame * CFrame.new(0, 0, -0.3)
+    
+    -- Neon ring animation
+    task.spawn(function()
+        local t = 0
+        while gun.Parent do
+            t = t + 0.05
+            if core and core.Parent then
+                core.BrickColor = t % 0.2 < 0.1 
+                    and BrickColor.new("Toothpaste") 
+                    or BrickColor.new("Cyan")
+            end
+            task.wait(0.05)
+        end
+    end)
+    
+    -- Floating crystal particles around gun
+    task.spawn(function()
+        while gun.Parent do
+            if gun.Parent then
+                local particle = Instance.new("Part")
+                particle.Size = Vector3.new(0.05, 0.05, 0.05)
+                particle.BrickColor = BrickColor.new("Cyan")
+                particle.Material = Enum.Material.Neon
+                particle.Anchored = true
+                particle.CanCollide = false
+                particle.CastShadow = false
+                particle.Parent = Workspace
+                
+                if body and body.Parent then
+                    particle.CFrame = body.CFrame * CFrame.new(
+                        math.random(-5, 5) * 0.1,
+                        math.random(-5, 5) * 0.1,
+                        math.random(-5, 5) * 0.1
+                    )
+                    
+                    local tween = TweenService:Create(particle, TweenInfo.new(0.5), {
+                        CFrame = particle.CFrame * CFrame.new(0, 0.5, 0),
+                        Size = Vector3.new(0.01, 0.01, 0.01)
+                    })
+                    tween:Play()
+                    tween.Completed:Connect(function()
+                        particle:Destroy()
+                    end)
+                else
+                    particle:Destroy()
+                end
+            end
+            task.wait(0.15)
+        end
+    end)
+    
+    gun.PrimaryPart = body
+    return gun
+end
+
+-- GUN 2: CHANNELING GUN (Ancient/Mystical themed)
+local function createChannelingGun()
+    local gun = Instance.new("Model")
+    gun.Name = "ChannelingGun"
+    
+    -- Staff-like body
+    local body = Instance.new("Part")
+    body.Name = "Handle"
+    body.Size = Vector3.new(0.3, 0.3, 1.5)
+    body.BrickColor = BrickColor.new("Reddish brown")
+    body.Material = Enum.Material.Wood
+    body.Parent = gun
+    
+    -- Ancient orb
+    local orb = Instance.new("Part")
+    orb.Size = Vector3.new(0.45, 0.45, 0.45)
+    orb.BrickColor = BrickColor.new("Magenta")
+    orb.Material = Enum.Material.Neon
+    orb.CastShadow = false
+    orb.Parent = gun
+    
+    local orbMesh = Instance.new("SpecialMesh")
+    orbMesh.MeshType = Enum.MeshType.Sphere
+    orbMesh.Parent = orb
+    
+    local orbWeld = Instance.new("WeldConstraint")
+    orbWeld.Part0 = body
+    orbWeld.Part1 = orb
+    orbWeld.Parent = gun
+    orb.CFrame = body.CFrame * CFrame.new(0, 0, -0.95)
+    
+    -- Orbiting rings
+    local ringColors = {
+        BrickColor.new("Magenta"),
+        BrickColor.new("Hot pink"),
+        BrickColor.new("Purple")
+    }
+    
+    local rings = {}
+    for i = 1, 3 do
+        local ring = Instance.new("Part")
+        ring.Size = Vector3.new(0.7, 0.05, 0.7)
+        ring.BrickColor = ringColors[i]
+        ring.Material = Enum.Material.Neon
+        ring.CastShadow = false
+        ring.Parent = gun
+        
+        local ringMesh = Instance.new("SpecialMesh")
+        ringMesh.MeshType = Enum.MeshType.Brick
+        ringMesh.Scale = Vector3.new(1, 0.1, 1)
+        ringMesh.Parent = ring
+        
+        local ringWeld = Instance.new("WeldConstraint")
+        ringWeld.Part0 = orb
+        ringWeld.Part1 = ring
+        ringWeld.Parent = gun
+        ring.CFrame = orb.CFrame * CFrame.Angles(
+            math.rad(i * 60),
+            math.rad(i * 40),
+            0
+        )
+        
+        rings[i] = {part = ring, weld = ringWeld, offset = i * 60}
+    end
+    
+    -- Ancient runes on body (decorative parts)
+    for i = 1, 5 do
+        local rune = Instance.new("Part")
+        rune.Size = Vector3.new(0.31, 0.08, 0.08)
+        rune.BrickColor = BrickColor.new("Bright orange")
+        rune.Material = Enum.Material.Neon
+        rune.CastShadow = false
+        rune.Parent = gun
+        
+        local runeWeld = Instance.new("WeldConstraint")
+        runeWeld.Part0 = body
+        runeWeld.Part1 = rune
+        runeWeld.Parent = gun
+        rune.CFrame = body.CFrame * CFrame.new(0, 0, -0.5 + i * 0.15)
+    end
+    
+    -- Grip wrapping
+    for i = 1, 6 do
+        local wrap = Instance.new("Part")
+        wrap.Size = Vector3.new(0.32, 0.06, 0.06)
+        wrap.BrickColor = BrickColor.new("Dark orange")
+        wrap.Material = Enum.Material.SmoothPlastic
+        wrap.Parent = gun
+        
+        local wrapWeld = Instance.new("WeldConstraint")
+        wrapWeld.Part0 = body
+        wrapWeld.Part1 = wrap
+        wrapWeld.Parent = gun
+        wrap.CFrame = body.CFrame * CFrame.new(0, 0, 0.1 + i * 0.08)
+    end
+    
+    -- Animate orb pulsing and rings orbiting
+    task.spawn(function()
+        local t = 0
+        while gun.Parent do
+            t = t + 0.03
+            if orb and orb.Parent then
+                local pulse = 0.45 + math.sin(t * 3) * 0.08
+                orbMesh.Scale = Vector3.new(pulse * 2, pulse * 2, pulse * 2)
+                
+                -- Cycle orb color
+                local r = (math.sin(t) + 1) / 2
+                local g = (math.sin(t + 2) + 1) / 2
+                local b = (math.sin(t + 4) + 1) / 2
+                orb.Color = Color3.new(r, g * 0.3, b)
+            end
+            task.wait(0.03)
+        end
+    end)
+    
+    gun.PrimaryPart = body
+    return gun
+end
+
+-- GUN 3: MOUNT GUN (Mechanical/Steampunk themed)
+local function createMountGun()
+    local gun = Instance.new("Model")
+    gun.Name = "MountGun"
+    
+    -- Heavy body
+    local body = Instance.new("Part")
+    body.Name = "Handle"
+    body.Size = Vector3.new(0.5, 0.5, 1.4)
+    body.BrickColor = BrickColor.new("Dark stone grey")
+    body.Material = Enum.Material.Metal
+    body.Parent = gun
+    
+    -- Mechanical barrel
+    local barrel = Instance.new("Part")
+    barrel.Size = Vector3.new(0.25, 0.25, 1.0)
+    barrel.BrickColor = BrickColor.new("Mid gray")
+    barrel.Material = Enum.Material.Metal
+    barrel.Parent = gun
+    
+    local barrelWeld = Instance.new("WeldConstraint")
+    barrelWeld.Part0 = body
+    barrelWeld.Part1 = barrel
+    barrelWeld.Parent = gun
+    barrel.CFrame = body.CFrame * CFrame.new(0, 0.1, -1.1)
+    
+    -- Barrel rings
+    for i = 1, 4 do
+        local ring = Instance.new("Part")
+        ring.Size = Vector3.new(0.32, 0.32, 0.06)
+        ring.BrickColor = BrickColor.new("Bright orange")
+        ring.Material = Enum.Material.Neon
+        ring.CastShadow = false
+        ring.Parent = gun
+        
+        local ringWeld = Instance.new("WeldConstraint")
+        ringWeld.Part0 = barrel
+        ringWeld.Part1 = ring
+        ringWeld.Parent = gun
+        ring.CFrame = barrel.CFrame * CFrame.new(0, 0, -0.3 + i * 0.15)
+        
+        local ringMesh = Instance.new("SpecialMesh")
+        ringMesh.MeshType = Enum.MeshType.Cylinder
+        ringMesh.Parent = ring
+    end
+    
+    -- Energy tank
+    local tank = Instance.new("Part")
+    tank.Size = Vector3.new(0.35, 0.35, 0.8)
+    tank.BrickColor = BrickColor.new("Lime green")
+    tank.Material = Enum.Material.Neon
+    tank.CastShadow = false
+    tank.Parent = gun
+    
+    local tankWeld = Instance.new("WeldConstraint")
+    tankWeld.Part0 = body
+    tankWeld.Part1 = tank
+    tankWeld.Parent = gun
+    tank.CFrame = body.CFrame * CFrame.new(0, 0.45, 0.1)
+    
+    local tankMesh = Instance.new("SpecialMesh")
+    tankMesh.MeshType = Enum.MeshType.Cylinder
+    tankMesh.Parent = tank
+    
+    -- Gears (decorative)
+    for i = 1, 3 do
+        local gear = Instance.new("Part")
+        gear.Size = Vector3.new(0.3, 0.3, 0.05)
+        gear.BrickColor = BrickColor.new("Medium stone grey")
+        gear.Material = Enum.Material.Metal
+        gear.Parent = gun
+        
+        local gearMesh = Instance.new("SpecialMesh")
+        gearMesh.MeshType = Enum.MeshType.FileMesh
+        gearMesh.MeshId = "rbxassetid://9756362"
+        gearMesh.Scale = Vector3.new(0.08, 0.08, 0.08)
+        gearMesh.Parent = gear
+        
+        local gearWeld = Instance.new("WeldConstraint")
+        gearWeld.Part0 = body
+        gearWeld.Part1 = gear
+        gearWeld.Parent = gun
+        gear.CFrame = body.CFrame * CFrame.new(0.3, 0.2 - i * 0.15, 0.2 + i * 0.1)
+    end
+    
+    -- Grip
+    local grip = Instance.new("Part")
+    grip.Size = Vector3.new(0.3, 0.6, 0.35)
+    grip.BrickColor = BrickColor.new("Black")
+    grip.Material = Enum.Material.SmoothPlastic
+    grip.Parent = gun
+    
+    local gripWeld = Instance.new("WeldConstraint")
+    gripWeld.Part0 = body
+    gripWeld.Part1 = grip
+    gripWeld.Parent = gun
+    grip.CFrame = body.CFrame * CFrame.new(0, -0.55, 0.2)
+    
+    -- Scope
+    local scope = Instance.new("Part")
+    scope.Size = Vector3.new(0.12, 0.12, 0.6)
+    scope.BrickColor = BrickColor.new("Really black")
+    scope.Material = Enum.Material.Metal
+    scope.Parent = gun
+    
+    local scopeWeld = Instance.new("WeldConstraint")
+    scopeWeld.Part0 = body
+    scopeWeld.Part1 = scope
+    scopeWeld.Parent = gun
+    scope.CFrame = body.CFrame * CFrame.new(0, 0.35, -0.4)
+    
+    -- Scope lens glow
+    local lens = Instance.new("Part")
+    lens.Size = Vector3.new(0.13, 0.13, 0.05)
+    lens.BrickColor = BrickColor.new("Cyan")
+    lens.Material = Enum.Material.Neon
+    lens.CastShadow = false
+    lens.Parent = gun
+    
+    local lensWeld = Instance.new("WeldConstraint")
+    lensWeld.Part0 = scope
+    lensWeld.Part1 = lens
+    lensWeld.Parent = gun
+    lens.CFrame = scope.CFrame * CFrame.new(0, 0, -0.33)
+    
+    -- Animate tank energy flow
+    task.spawn(function()
+        local t = 0
+        while gun.Parent do
+            t = t + 0.04
+            if tank and tank.Parent then
+                local g = (math.sin(t * 2) + 1) / 2
+                tank.Color = Color3.new(g * 0.3, g, g * 0.2)
+            end
+            task.wait(0.04)
+        end
+    end)
+    
+    gun.PrimaryPart = body
+    return gun
+end
+
+-- =============================================
+-- GUN EQUIP SYSTEM
+-- =============================================
+local equippedGunModel = nil
+local gunWeld = nil
+
+local function unequipCurrentGun()
+    if equippedGunModel then
+        equippedGunModel:Destroy()
+        equippedGunModel = nil
+        gunWeld = nil
+    end
+    isEquipped = false
+    currentGun = nil
+end
+
+local function equipGun(gunIndex)
+    unequipCurrentGun()
+    
+    local rightHand = Character:FindFirstChild("Right Arm") or Character:FindFirstChild("RightHand")
+    if not rightHand then return end
+    
+    local gunModel
+    if gunIndex == 1 then
+        gunModel = createFreezeGun()
+    elseif gunIndex == 2 then
+        gunModel = createChannelingGun()
+    elseif gunIndex == 3 then
+        gunModel = createMountGun()
+    end
+    
+    if not gunModel then return end
+    
+    gunModel.Parent = Character
+    
+    -- Weld to right arm
+    local handle = gunModel:FindFirstChild("Handle") or gunModel.PrimaryPart
+    if handle then
+        local weld = Instance.new("Motor6D")
+        weld.Part0 = rightHand
+        weld.Part1 = handle
+        
+        -- Position gun in hand
+        weld.C0 = CFrame.new(0, -1, 0) * CFrame.Angles(math.rad(90), 0, 0)
+        weld.C1 = CFrame.new(0, 0, 0)
+        weld.Parent = rightHand
+        
+        equippedGunModel = gunModel
+        gunWeld = weld
+        isEquipped = true
+        currentGun = gunIndex
+        currentGunIndex = gunIndex
+        
+        -- Gun equip animation
+        isShootAnim = false
+    end
+end
+
+-- =============================================
+-- FREEZE GUN EFFECTS
+-- =============================================
+local function freezeNPC(npc)
+    if not npc or frozenNPCs[npc] then return end
+    
+    local humanoid = npc:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    frozenNPCs[npc] = {
+        walkSpeed = humanoid.WalkSpeed,
+        jumpPower = humanoid.JumpPower
+    }
+    
+    humanoid.WalkSpeed = 0
+    humanoid.JumpPower = 0
+    
+    -- Freeze visual effect - ice coating
+    local frozenParts = {}
+    for _, part in pairs(npc:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local iceOverlay = Instance.new("SelectionBox")
+            iceOverlay.Adornee = part
+            iceOverlay.Color3 = Color3.fromRGB(100, 200, 255)
+            iceOverlay.LineThickness = 0.05
+            iceOverlay.SurfaceTransparency = 0.7
+            iceOverlay.SurfaceColor3 = Color3.fromRGB(150, 220, 255)
+            iceOverlay.Parent = part
+            table.insert(frozenParts, iceOverlay)
+            
+            -- Tint the part
+            if part:IsA("Part") or part:IsA("MeshPart") then
+                local origColor = part.Color
+                part.Color = Color3.fromRGB(
+                    origColor.R * 255 * 0.5 + 130,
+                    origColor.G * 255 * 0.5 + 180,
+                    origColor.B * 255 * 0.5 + 220
+                )
+            end
+        end
+    end
+    
+    -- Freeze particles
+    local hrp = npc:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local attachment = Instance.new("Attachment")
+        attachment.Parent = hrp
+        
+        local particles = Instance.new("ParticleEmitter")
+        particles.Color = ColorSequence.new{
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 240, 255)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 180, 255))
+        }
+        particles.LightEmission = 0.5
+        particles.Size = NumberSequence.new{
+            NumberSequenceKeypoint.new(0, 0.3),
+            NumberSequenceKeypoint.new(1, 0)
+        }
+        particles.Lifetime = NumberRange.new(1, 2)
+        particles.Rate = 20
+        particles.SpreadAngle = Vector2.new(180, 180)
+        particles.Speed = NumberRange.new(1, 3)
+        particles.Parent = attachment
+        
+        frozenNPCs[npc].attachment = attachment
+        frozenNPCs[npc].parts = frozenParts
+        
+        -- Auto unfreeze after 15 seconds
+        task.delay(15, function()
+            if frozenNPCs[npc] then
+                humanoid.WalkSpeed = frozenNPCs[npc].walkSpeed
+                humanoid.JumpPower = frozenNPCs[npc].jumpPower
+                
+                for _, sel in pairs(frozenParts) do
+                    sel:Destroy()
+                end
+                
+                if attachment then attachment:Destroy() end
+                frozenNPCs[npc] = nil
+            end
+        end)
+    end
+    
+    -- Ice crack effect at NPC position
+    if hrp then
+        local iceEffect = Instance.new("Part")
+        iceEffect.Size = Vector3.new(5, 0.1, 5)
+        iceEffect.Anchored = true
+        iceEffect.CanCollide = false
+        iceEffect.CFrame = CFrame.new(hrp.Position.X, hrp.Position.Y - 3, hrp.Position.Z)
+        iceEffect.BrickColor = BrickColor.new("Cyan")
+        iceEffect.Material = Enum.Material.Glass
+        iceEffect.Transparency = 0.4
+        iceEffect.Parent = Workspace
+        
+        TweenService:Create(iceEffect, TweenInfo.new(1), {
+            Transparency = 1,
+            Size = Vector3.new(8, 0.05, 8)
+        }):Play()
+        
+        game:GetService("Debris"):AddItem(iceEffect, 2)
+    end
+    
+    print("[NPC Master] NPC Frozen: " .. npc.Name)
+end
+
+-- Create freeze projectile
+local function shootFreezeGun()
+    if not equippedGunModel then return end
+    local handle = equippedGunModel:FindFirstChild("Handle")
+    if not handle then return end
+    
+    local mousePos = Player:GetMouse().Hit.p
+    local direction = (mousePos - handle.Position).Unit
+    
+    -- Create ice projectile
+    local projectile = Instance.new("Part")
+    projectile.Size = Vector3.new(0.3, 0.3, 0.8)
+    projectile.BrickColor = BrickColor.new("Cyan")
+    projectile.Material = Enum.Material.Neon
+    projectile.CastShadow = false
+    projectile.Anchored = false
+    projectile.CanCollide = false
+    projectile.CFrame = CFrame.new(handle.Position, handle.Position + direction)
+    projectile.Parent = Workspace
+    
+    local projMesh = Instance.new("SpecialMesh")
+    projMesh.MeshType = Enum.MeshType.Diamond
+    projMesh.Parent = projectile
+    
+    -- Trail
+    local trail = Instance.new("Trail")
+    local a0 = Instance.new("Attachment")
+    local a1 = Instance.new("Attachment")
+    a0.Position = Vector3.new(0, 0, -0.4)
+    a1.Position = Vector3.new(0, 0, 0.4)
+    a0.Parent = projectile
+    a1.Parent = projectile
+    trail.Attachment0 = a0
+    trail.Attachment1 = a1
+    trail.Color = ColorSequence.new(Color3.fromRGB(150, 230, 255))
+    trail.Lifetime = 0.3
+    trail.Parent = projectile
+    
+    -- Add velocity
+    local bodyVelocity = Instance.new("BodyVelocity")
+    bodyVelocity.Velocity = direction * 80
+    bodyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bodyVelocity.Parent = projectile
+    
+    -- Detect hit
+    local hitConnection
+    hitConnection = projectile.Touched:Connect(function(hit)
+        if hit:IsDescendantOf(Character) then return end
+        
+        -- Find NPC
+        local hitModel = hit:FindFirstAncestorOfClass("Model")
+        if hitModel and hitModel:FindFirstChildOfClass("Humanoid") then
+            hitConnection:Disconnect()
+            
+            -- Ice burst effect
+            for i = 1, 12 do
+                local shard = Instance.new("Part")
+                shard.Size = Vector3.new(0.1, 0.1, 0.3)
+                shard.BrickColor = BrickColor.new("Cyan")
+                shard.Material = Enum.Material.Neon
+                shard.Anchored = false
+                shard.CastShadow = false
+                shard.CFrame = projectile.CFrame * CFrame.Angles(
+                    math.random() * math.pi * 2,
+                    math.random() * math.pi * 2,
+                    0
+                )
+                shard.Parent = Workspace
+                
+                local bv = Instance.new("BodyVelocity")
+                bv.Velocity = Vector3.new(
+                    math.random(-15, 15),
+                    math.random(5, 20),
+                    math.random(-15, 15)
+                )
+                bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+                bv.Parent = shard
+                game:GetService("Debris"):AddItem(shard, 1)
+            end
+            
+            freezeNPC(hitModel)
+            projectile:Destroy()
+        elseif hit ~= Workspace.Terrain then
+            hitConnection:Disconnect()
+            projectile:Destroy()
+        end
+    end)
+    
+    game:GetService("Debris"):AddItem(projectile, 5)
+    
+    -- Muzzle flash
+    local flash = Instance.new("Part")
+    flash.Size = Vector3.new(0.4, 0.4, 0.4)
+    flash.BrickColor = BrickColor.new("Cyan")
+    flash.Material = Enum.Material.Neon
+    flash.Anchored = true
+    flash.CanCollide = false
+    flash.CastShadow = false
+    flash.CFrame = handle.CFrame * CFrame.new(0, 0.1, -1.5)
+    flash.Parent = Workspace
+    
+    TweenService:Create(flash, TweenInfo.new(0.15), {
+        Size = Vector3.new(0.8, 0.8, 0.8),
+        Transparency = 1
+    }):Play()
+    
+    game:GetService("Debris"):AddItem(flash, 0.2)
+end
+
+-- =============================================
+-- CHANNELING GUN - CONVERT NPC TO LOYALIST
+-- =============================================
+local function convertToLoyalist(npc)
+    if not npc then return end
+    if loyalistNPCs[npc] then return end
+    
+    local humanoid = npc:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+    
+    loyalistNPCs[npc] = true
+    
+    -- Visual: change NPC color to friendly
+    for _, part in pairs(npc:GetDescendants()) do
+        if part:IsA("BasePart") then
+            -- Add green/gold tint
+            TweenService:Create(part, TweenInfo.new(0.5), {
+                Color = Color3.fromRGB(
+                    math.min(part.Color.R * 255 + 50, 255),
+                    math.min(part.Color.G * 255 + 80, 255),
+                    math.max(part.Color.B * 255 - 30, 0)
+                )
+            }):Play()
+        end
+    end
+    
+    -- Crown/loyalty marker
+    local hrp = npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChild("Head")
+    if hrp then
+        local crownGui = Instance.new("BillboardGui")
+        crownGui.Size = UDim2.new(2, 0, 1, 0)
+        crownGui.StudsOffset = Vector3.new(0, 3.5, 0)
+        crownGui.AlwaysOnTop = false
+        crownGui.Parent = hrp
+        
+        local crownLabel = Instance.new("TextLabel")
+        crownLabel.Size = UDim2.new(1, 0, 1, 0)
+        crownLabel.BackgroundTransparency = 1
+        crownLabel.Text = "👑 LOYALIST"
+        crownLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+        crownLabel.TextStrokeTransparency = 0
+        crownLabel.TextStrokeColor3 = Color3.fromRGB(100, 50, 0)
+        crownLabel.Font = Enum.Font.GothamBold
+        crownLabel.TextScaled = true
+        crownLabel.Parent = crownGui
+    end
+    
+    -- Loyalist conversion effect
+    if hrp then
+        local attachment = Instance.new("Attachment")
+        attachment.Parent = hrp
+        
+        local particles = Instance.new("ParticleEmitter")
+        particles.Color = ColorSequence.new{
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 215, 0)),
+            ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 140, 0)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 100, 0))
+        }
+        particles.LightEmission = 0.8
+        particles.Size = NumberSequence.new{
+            NumberSequenceKeypoint.new(0, 0.5),
+            NumberSequenceKeypoint.new(1, 0)
+        }
+        particles.Lifetime = NumberRange.new(1.5, 3)
+        particles.Rate = 15
+        particles.SpreadAngle = Vector2.new(180, 180)
+        particles.Speed = NumberRange.new(2, 5)
+        particles.RotSpeed = NumberRange.new(-45, 45)
+        particles.Parent = attachment
+        
+        -- Reduce rate after initial burst
+        task.delay(2, function()
+            particles.Rate = 5
+        end)
+    end
+    
+    -- Make NPC follow and protect player with basic AI
+    task.spawn(function()
+        local followDistance = 8
+        while loyalistNPCs[npc] and npc.Parent do
+            if humanoid.Health <= 0 then
+                loyalistNPCs[npc] = nil
+                break
+            end
+            
+            if HumanoidRootPart then
+                local dist = (npc:FindFirstChild("HumanoidRootPart") and 
+                    npc.HumanoidRootPart.Position or npc.PrimaryPart and npc.PrimaryPart.Position)
+                
+                if dist then
+                    local distFromPlayer = (dist - HumanoidRootPart.Position).Magnitude
+                    
+                    if distFromPlayer > followDistance then
+                        -- Follow player
+                        humanoid:MoveTo(HumanoidRootPart.Position)
+                    else
+                        -- Find enemies to fight
+                        for _, otherModel in pairs(Workspace:GetChildren()) do
+                            if otherModel ~= Character and otherModel ~= npc and 
+                               otherModel:FindFirstChildOfClass("Humanoid") and 
+                               not loyalistNPCs[otherModel] then
+                                local enemyHRP = otherModel:FindFirstChild("HumanoidRootPart")
+                                if enemyHRP then
+                                    local enemyDist = (enemyHRP.Position - dist).Magnitude
+                                    if enemyDist < 30 then
+                                        humanoid:MoveTo(enemyHRP.Position)
+                                        -- Damage enemy if close
+                                        if enemyDist < 5 then
+                                            local enemyHumanoid = otherModel:FindFirstChildOfClass("Humanoid")
+                                            if enemyHumanoid then
+                                                enemyHumanoid:TakeDamage(10)
+                                            end
+                                        end
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            
+            task.wait(1)
+        end
+    end)
+    
+    print("[NPC Master] NPC Converted to Loyalist: " .. npc.Name)
+end
+
+local function shootChannelingGun(targetPos)
+    if not equippedGunModel then return end
+    local handle = equippedGunModel:FindFirstChild("Handle")
+    if not handle then return end
+    
+    local mouse = Player:GetMouse()
+    local mousePos = mouse.Hit.p
+    local direction = (mousePos - handle.Position).Unit
+    
+    -- Check if shooting at clouds/sky (global command)
+    local isShootingAtSky = false
+    if mouse.Target == nil or mousePos.Y > HumanoidRootPart.Position.Y + 50 then
+        isShootingAtSky = true
+    end
+    
+    if isShootingAtSky then
+        -- GLOBAL COMMAND: All enemies obey!
+        print("[NPC Master] GLOBAL COMMAND ISSUED - All enemies now obey!")
+        
+        -- Epic sky beam effect
+        local skyBeam = Instance.new("Part")
+        skyBeam.Size = Vector3.new(2, 500, 2)
+        skyBeam.BrickColor = BrickColor.new("Magenta")
+        skyBeam.Material = Enum.Material.Neon
+        skyBeam.Anchored = true
+        skyBeam.CanCollide = false
+        skyBeam.CastShadow = false
+        skyBeam.CFrame = CFrame.new(
+            HumanoidRootPart.Position.X,
+            HumanoidRootPart.Position.Y + 250,
+            HumanoidRootPart.Position.Z
+        )
+        skyBeam.Transparency = 0.3
+        skyBeam.Parent = Workspace
+        
+        -- Expanding ring pulse
+        for i = 1, 5 do
+            task.delay(i * 0.2, function()
+                local ring = Instance.new("Part")
+                ring.Size = Vector3.new(i * 15, 1, i * 15)
+                ring.Anchored = true
+                ring.CanCollide = false
+                ring.CastShadow = false
+                ring.BrickColor = BrickColor.new("Magenta")
+                ring.Material = Enum.Material.Neon
+                ring.Transparency = 0.3
+                ring.CFrame = CFrame.new(HumanoidRootPart.Position + Vector3.new(0, 1, 0))
+                ring.Parent = Workspace
+                
+                TweenService:Create(ring, TweenInfo.new(1), {
+                    Size = Vector3.new(i * 30, 0.5, i * 30),
+                    Transparency = 1
+                }):Play()
+                
+                game:GetService("Debris"):AddItem(ring, 1.5)
+            end)
+        end
+        
+        TweenService:Create(skyBeam, TweenInfo.new(2), {
+            Transparency = 1,
+            Size = Vector3.new(5, 500, 5)
+        }):Play()
+        
+        game:GetService("Debris"):AddItem(skyBeam, 2.5)
+        
+        -- Convert ALL NPCs in workspace
+        task.spawn(function()
+            for _, model in pairs(Workspace:GetChildren()) do
+                if model ~= Character and model:FindFirstChildOfClass("Humanoid") then
+                    task.wait(0.1)
+                    convertToLoyalist(model)
+                end
+            end
+        end)
+        return
+    end
+    
+    -- Create channeling beam projectile
+    local projectile = Instance.new("Part")
+    projectile.Size = Vector3.new(0.4, 0.4, 1.0)
+    projectile.BrickColor = BrickColor.new("Magenta")
+    projectile.Material = Enum.Material.Neon
+    projectile.CastShadow = false
+    projectile.Anchored = false
+    projectile.CanCollide = false
+    projectile.CFrame = CFrame.new(handle.Position, handle.Position + direction)
+    projectile.Parent = Workspace
+    
+    -- Swirling trail
+    local trail = Instance.new("Trail")
+    local a0 = Instance.new("Attachment")
+    local a1 = Instance.new("Attachment")
+    a0.Position = Vector3.new(0, 0.2, 0)
+    a1.Position = Vector3.new(0, -0.2, 0)
+    a0.Parent = projectile
+    a1.Parent = projectile
+    trail.Attachment0 = a0
+    trail.Attachment1 = a1
+    trail.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 140, 0))
+    }
+    trail.Lifetime = 0.5
+    trail.WidthScale = NumberSequence.new{
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(1, 0)
+    }
+    trail.Parent = projectile
+    
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity = direction * 70
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bv.Parent = projectile
+    
+    -- Spin projectile
+    local bg = Instance.new("BodyAngularVelocity")
+    bg.AngularVelocity = Vector3.new(0, 20, 0)
+    bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+    bg.Parent = projectile
+    
+    local hitConn
+    hitConn = projectile.Touched:Connect(function(hit)
+        if hit:IsDescendantOf(Character) then return end
+        
+        local hitModel = hit:FindFirstAncestorOfClass("Model")
+        if hitModel and hitModel:FindFirstChildOfClass("Humanoid") then
+            hitConn:Disconnect()
+            
+            -- Channeling burst
+            for i = 1, 8 do
+                local orb = Instance.new("Part")
+                orb.Size = Vector3.new(0.2, 0.2, 0.2)
+                orb.BrickColor = BrickColor.new("Magenta")
+                orb.Material = Enum.Material.Neon
+                orb.Anchored = false
+                orb.CastShadow = false
+                orb.CFrame = projectile.CFrame
+                orb.Parent = Workspace
+                
+                local bv2 = Instance.new("BodyVelocity")
+                bv2.Velocity = Vector3.new(
+                    math.random(-20, 20),
+                    math.random(10, 25),
+                    math.random(-20, 20)
+                )
+                bv2.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+                bv2.Parent = orb
+                game:GetService("Debris"):AddItem(orb, 1)
+            end
+            
+            convertToLoyalist(hitModel)
+            projectile:Destroy()
+        elseif hit ~= Workspace.Terrain then
+            hitConn:Disconnect()
+            projectile:Destroy()
+        end
+    end)
+    
+    game:GetService("Debris"):AddItem(projectile, 6)
+    
+    -- Muzzle effect
+    local orbFlash = Instance.new("Part")
+    orbFlash.Size = Vector3.new(0.6, 0.6, 0.6)
+    orbFlash.BrickColor = BrickColor.new("Magenta")
+    orbFlash.Material = Enum.Material.Neon
+    orbFlash.Anchored = true
+    orbFlash.CanCollide = false
+    orbFlash.CastShadow = false
+    orbFlash.Shape = Enum.PartType.Ball
+    orbFlash.CFrame = handle.CFrame * CFrame.new(0, 0, -1.0)
+    orbFlash.Parent = Workspace
+    
+    TweenService:Create(orbFlash, TweenInfo.new(0.2), {
+        Size = Vector3.new(1.5, 1.5, 1.5),
+        Transparency = 1
+    }):Play()
+    
+    game:GetService("Debris"):AddItem(orbFlash, 0.25)
+end
+
+-- =============================================
+-- MOUNT GUN - MOUNT NPC
+-- =============================================
+local function mountNPC(npc)
+    if not npc then return end
+    if isMounted then return end
+    
+    local npcHRP = npc:FindFirstChild("HumanoidRootPart")
+    if not npcHRP then return end
+    
+    local npcHumanoid = npc:FindFirstChildOfClass("Humanoid")
+    if not npcHumanoid then return end
+    
+    isMounted = true
+    mountedNPC = npc
+    
+    -- Weld player to NPC
+    local mountWeld = Instance.new("Weld")
+    mountWeld.Name = "MountWeld"
+    mountWeld.Part0 = npcHRP
+    mountWeld.Part1 = HumanoidRootPart
+    mountWeld.C0 = CFrame.new(0, 3, 0) -- Sit on top
+    mountWeld.Parent = npcHRP
+    
+    -- Disable player movement
+    Humanoid.WalkSpeed = 0
+    Humanoid.JumpPower = 0
+    
+    -- Player sit animation
+    Humanoid.Sit = true
+    
+    -- Mount indicator
+    local mountGui = Instance.new("BillboardGui")
+    mountGui.Name = "MountIndicator"
+    mountGui.Size = UDim2.new(3, 0, 1, 0)
+    mountGui.StudsOffset = Vector3.new(0, 5, 0)
+    mountGui.AlwaysOnTop = false
+    mountGui.Parent = npcHRP
+    
+    local mountLabel = Instance.new("TextLabel")
+    mountLabel.Size = UDim2.new(1, 0, 1, 0)
+    mountLabel.BackgroundTransparency = 1
+    mountLabel.Text = "🐴 MOUNTED - [E] to Dismount"
+    mountLabel.TextColor3 = Color3.fromRGB(255, 140, 0)
+    mountLabel.TextStrokeTransparency = 0
+    mountLabel.Font = Enum.Font.GothamBold
+    mountLabel.TextScaled = true
+    mountLabel.Parent = mountGui
+    
+    -- Screen UI for mounted state
+    local playerGui = Player.PlayerGui
+    local mountHUD = Instance.new("ScreenGui")
+    mountHUD.Name = "MountHUD"
+    mountHUD.Parent = playerGui
+    
+    local mountFrame = Instance.new("Frame")
+    mountFrame.Size = UDim2.new(0.3, 0, 0.08, 0)
+    mountFrame.Position = UDim2.new(0.35, 0, 0.9, 0)
+    mountFrame.BackgroundColor3 = Color3.fromRGB(50, 30, 0)
+    mountFrame.BorderSizePixel = 3
+    mountFrame.Parent = mountHUD
+    
+    local mountText = Instance.new("TextLabel")
+    mountText.Size = UDim2.new(1, 0, 1, 0)
+    mountText.BackgroundTransparency = 1
+    mountText.Text = "🐴 MOUNTED: " .. npc.Name .. " | [E] Dismount | WASD Steer"
+    mountText.TextColor3 = Color3.fromRGB(255, 200, 0)
+    mountText.Font = Enum.Font.GothamBold
+    mountText.TextScaled = true
+    mountText.Parent = mountFrame
+    
+    -- Control mounted NPC movement
+    local steerConnection
+    steerConnection = RunService.Heartbeat:Connect(function()
+        if not isMounted or not mountedNPC or not mountedNPC.Parent then
+            if steerConnection then steerConnection:Disconnect() end
+            return
+        end
+        
+        local moveDir = Vector3.new(0, 0, 0)
+        local camCF = Camera.CFrame
+        
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+            moveDir = moveDir + camCF.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+            moveDir = moveDir - camCF.LookVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            moveDir = moveDir - camCF.RightVector
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            moveDir = moveDir + camCF.RightVector
+        end
+        
+        moveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
+        
+        if moveDir.Magnitude > 0 then
+            npcHumanoid:MoveTo(npcHRP.Position + moveDir.Unit * 5)
+            npcHumanoid.WalkSpeed = 18
+        else
+            npcHumanoid.WalkSpeed = 0
+        end
+    end)
+    
+    -- Mount dust particles
+    local dustAttach = Instance.new("Attachment")
+    dustAttach.Name = "MountDust"
+    dustAttach.Parent = npcHRP
+    
+    local dustParticles = Instance.new("ParticleEmitter")
+    dustParticles.Color = ColorSequence.new(Color3.fromRGB(180, 140, 80))
+    dustParticles.Size = NumberSequence.new{
+        NumberSequenceKeypoint.new(0, 0.4),
+        NumberSequenceKeypoint.new(1, 0)
+    }
+    dustParticles.Lifetime = NumberRange.new(0.5, 1.5)
+    dustParticles.Rate = 10
+    dustParticles.SpreadAngle = Vector2.new(60, 60)
+    dustParticles.Speed = NumberRange.new(2, 8)
+    dustParticles.RotSpeed = NumberRange.new(-30, 30)
+    dustParticles.Parent = dustAttach
+    
+    print("[NPC Master] Mounted NPC: " .. npc.Name)
+    
+    return {
+        weld = mountWeld,
+        gui = mountGui,
+        hud = mountHUD,
+        steerConn = steerConnection,
+        dust = dustAttach
+    }
+end
+
+local mountData = nil
+
+local function dismountNPC()
+    if not isMounted or not mountedNPC then return end
+    
+    -- Remove weld
+    local npcHRP = mountedNPC:FindFirstChild("HumanoidRootPart")
+    if npcHRP then
+        local weld = npcHRP:FindFirstChild("MountWeld")
+        if weld then weld:Destroy() end
+        
+        local dustAttach = npcHRP:FindFirstChild("MountDust")
+        if dustAttach then dustAttach:Destroy() end
+        
+        local mountIndicator = npcHRP:FindFirstChild("MountIndicator") 
+        if mountIndicator then mountIndicator:Destroy() end
+        
+        -- Stop NPC
+        local npcHumanoid = mountedNPC:FindFirstChildOfClass("Humanoid")
+        if npcHumanoid then
+            npcHumanoid.WalkSpeed = 16
+        end
+    end
+    
+    -- Restore player
+    Humanoid.WalkSpeed = 16
+    Humanoid.JumpPower = 50
+    Humanoid.Sit = false
+    
+    -- Remove HUD
+    local playerGui = Player.PlayerGui
+    local mountHUD = playerGui:FindFirstChild("MountHUD")
+    if mountHUD then mountHUD:Destroy() end
+    
+    -- Teleport player off NPC
+    if npcHRP then
+        HumanoidRootPart.CFrame = npcHRP.CFrame * CFrame.new(0, 5, 3)
+    end
+    
+    isMounted = false
+    mountedNPC = nil
+    
+    print("[NPC Master] Dismounted!")
+end
+
+local function shootMountGun()
+    if not equippedGunModel then return end
+    local handle = equippedGunModel:FindFirstChild("Handle")
+    if not handle then return end
+    
+    -- If already mounted, dismount
+    if isMounted then
+        dismountNPC()
+        return
+    end
+    
+    local mouse = Player:GetMouse()
+    local mousePos = mouse.Hit.p
+    local direction = (mousePos - handle.Position).Unit
+    
+    -- Create mount beam
+    local beam = Instance.new("Part")
+    beam.Size = Vector3.new(0.2, 0.2, 1.0)
+    beam.BrickColor = BrickColor.new("Bright orange")
+    beam.Material = Enum.Material.Neon
+    beam.CastShadow = false
+    beam.Anchored = false
+    beam.CanCollide = false
+    beam.CFrame = CFrame.new(handle.Position, handle.Position + direction)
+    beam.Parent = Workspace
+    
+    local trail = Instance.new("Trail")
+    local a0 = Instance.new("Attachment")
+    local a1 = Instance.new("Attachment")
+    a0.Position = Vector3.new(0, 0.1, 0)
+    a1.Position = Vector3.new(0, -0.1, 0)
+    a0.Parent = beam
+    a1.Parent = beam
+    trail.Attachment0 = a0
+    trail.Attachment1 = a1
+    trail.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 140, 0)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 220, 0))
+    }
+    trail.Lifetime = 0.4
+    trail.Parent = beam
+    
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity = direction * 60
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bv.Parent = beam
+    
+    local hitConn
+    hitConn = beam.Touched:Connect(function(hit)
+        if hit:IsDescendantOf(Character) then return end
+        
+        local hitModel = hit:FindFirstAncestorOfClass("Model")
+        if hitModel and hitModel:FindFirstChildOfClass("Humanoid") then
+            hitConn:Disconnect()
+            
+            -- Lasso effect
+            local npcHRP = hitModel:FindFirstChild("HumanoidRootPart")
+            if npcHRP then
+                -- Rope visual from player to NPC
+                local rope = Instance.new("RopeConstraint")
+                local att0 = Instance.new("Attachment")
+                local att1 = Instance.new("Attachment")
+                att0.Parent = HumanoidRootPart
+                att1.Parent = npcHRP
+                rope.Attachment0 = att0
+                rope.Attachment1 = att1
+                rope.Visible = true
+                rope.Color = BrickColor.new("Bright orange")
+                rope.Thickness = 0.05
+                rope.Length = (npcHRP.Position - HumanoidRootPart.Position).Magnitude + 2
+                rope.Parent = HumanoidRootPart
+                
+                -- Rope reel-in effect
+                task.spawn(function()
+                    for i = 1, 10 do
+                        rope.Length = math.max(rope.Length - 2, 0)
+                        task.wait(0.1)
+                    end
+                    rope:Destroy()
+                    att0:Destroy()
+                    att1:Destroy()
+                    
+                    -- Mount the NPC
+                    mountData = mountNPC(hitModel)
+                end)
+            end
+            
+            beam:Destroy()
+        elseif hit ~= Workspace.Terrain then
+            hitConn:Disconnect()
+            beam:Destroy()
+        end
+    end)
+    
+    game:GetService("Debris"):AddItem(beam, 5)
+    
+    -- Muzzle flash
+    local muzzleFlash = Instance.new("Part")
+    muzzleFlash.Size = Vector3.new(0.5, 0.5, 0.5)
+    muzzleFlash.BrickColor = BrickColor.new("Bright orange")
+    muzzleFlash.Material = Enum.Material.Neon
+    muzzleFlash.Anchored = true
+    muzzleFlash.CanCollide = false
+    muzzleFlash.CastShadow = false
+    muzzleFlash.Shape = Enum.PartType.Ball
+    muzzleFlash.CFrame = handle.CFrame * CFrame.new(0, 0, -1.3)
+    muzzleFlash.Parent = Workspace
+    
+    TweenService:Create(muzzleFlash, TweenInfo.new(0.15), {
+        Size = Vector3.new(1.2, 1.2, 1.2),
+        Transparency = 1
+    }):Play()
+    
+    game:GetService("Debris"):AddItem(muzzleFlash, 0.2)
+end
+
+-- =============================================
+-- HUD / INVENTORY UI
+-- =============================================
+local playerGui = Player.PlayerGui
+
+-- Remove old HUD if exists
+local oldHUD = playerGui:FindFirstChild("NPCMasterHUD")
+if oldHUD then oldHUD:Destroy() end
+
+local hudGui = Instance.new("ScreenGui")
+hudGui.Name = "NPCMasterHUD"
+hudGui.ResetOnSpawn = false
+hudGui.Parent = playerGui
+
+-- Main HUD Frame
+local hudFrame = Instance.new("Frame")
+hudFrame.Size = UDim2.new(0, 400, 0, 140)
+hudFrame.Position = UDim2.new(0.5, -200, 1, -160)
+hudFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 20)
+hudFrame.BackgroundTransparency = 0.3
+hudFrame.BorderSizePixel = 0
+hudFrame.Parent = hudGui
+
+local hudCorner = Instance.new("UICorner")
+hudCorner.CornerRadius = UDim.new(0, 12)
+hudCorner.Parent = hudFrame
+
+local hudStroke = Instance.new("UIStroke")
+hudStroke.Color = Color3.fromRGB(0, 200, 255)
+hudStroke.Thickness = 2
+hudStroke.Parent = hudFrame
+
+-- Title
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, 0, 0.2, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "⚡ NPC MASTER ⚡"
+titleLabel.TextColor3 = Color3.fromRGB(0, 220, 255)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextScaled = true
+titleLabel.Parent = hudFrame
+
+-- Gun slots
+local gunNames = {"❄️ FREEZE", "✨ CHANNEL", "🔗 MOUNT"}
+local gunColors = {
+    Color3.fromRGB(0, 200, 255),
+    Color3.fromRGB(255, 0, 255),
+    Color3.fromRGB(255, 140, 0)
+}
+local gunButtons = {}
+
+local slotFrame = Instance.new("Frame")
+slotFrame.Size = UDim2.new(1, -20, 0.65, 0)
+slotFrame.Position = UDim2.new(0, 10, 0.28, 0)
+slotFrame.BackgroundTransparency = 1
+slotFrame.Parent = hudFrame
+
+local slotLayout = Instance.new("UIListLayout")
+slotLayout.FillDirection = Enum.FillDirection.Horizontal
+slotLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+slotLayout.Padding = UDim.new(0, 8)
+slotLayout.Parent = slotFrame
+
+for i = 1, 3 do
+    local slotBtn = Instance.new("TextButton")
+    slotBtn.Size = UDim2.new(0.3, 0, 1, 0)
+    slotBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 40)
+    slotBtn.BorderSizePixel = 0
+    slotBtn.Text = "[" .. i .. "] " .. gunNames[i]
+    slotBtn.TextColor3 = gunColors[i]
+    slotBtn.Font = Enum.Font.GothamBold
+    slotBtn.TextScaled = true
+    slotBtn.Parent = slotFrame
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 8)
+    btnCorner.Parent = slotBtn
+    
+    local btnStroke = Instance.new("UIStroke")
+    btnStroke.Color = gunColors[i]
+    btnStroke.Thickness = 2
+    btnStroke.Parent = slotBtn
+    
+    local idx = i
+    slotBtn.MouseButton1Click:Connect(function()
+        if currentGun == idx then
+            unequipCurrentGun()
+            updateGunSlotHighlight(0)
+        else
+            equipGun(idx)
+            updateGunSlotHighlight(idx)
+        end
+    end)
+    
+    gunButtons[i] = {button = slotBtn, stroke = btnStroke}
+end
+
+function updateGunSlotHighlight(active)
+    for i, data in ipairs(gunButtons) do
+        if i == active then
+            data.button.BackgroundColor3 = Color3.fromRGB(30, 30, 70)
+            data.stroke.Thickness = 3
+        else
+            data.button.BackgroundColor3 = Color3.fromRGB(20, 20, 40)
+            data.stroke.Thickness = 2
+        end
+    end
+end
+
+-- Stats display
+local statsFrame = Instance.new("Frame")
+statsFrame.Size = UDim2.new(1, -20, 0.2, 0)
+statsFrame.Position = UDim2.new(0, 10, 0.82, -5)
+statsFrame.BackgroundTransparency = 1
+statsFrame.Parent = hudFrame
+
+local statsLabel = Instance.new("TextLabel")
+statsLabel.Size = UDim2.new(1, 0, 1, 0)
+statsLabel.BackgroundTransparency = 1
+statsLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+statsLabel.Font = Enum.Font.Gotham
+statsLabel.TextScaled = true
+statsLabel.Parent = statsFrame
+
+local function updateStats()
+    local frozen = 0
+    for _ in pairs(frozenNPCs) do frozen = frozen + 1 end
+    local loyal = 0
+    for _ in pairs(loyalistNPCs) do loyal = loyal + 1 end
+    statsLabel.Text = string.format(
+        "❄️ Frozen: %d  |  👑 Loyalists: %d  |  🐴 Mounted: %s",
+        frozen, loyal,
+        isMounted and (mountedNPC and mountedNPC.Name or "Yes") or "No"
+    )
+end
+
+-- Notification system
+local function showNotification(text, color)
+    local notifGui = Instance.new("ScreenGui")
+    notifGui.Parent = playerGui
+    
+    local notifFrame = Instance.new("Frame")
+    notifFrame.Size = UDim2.new(0.4, 0, 0.06, 0)
+    notifFrame.Position = UDim2.new(0.3, 0, 0.05, 0)
+    notifFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 20)
+    notifFrame.BackgroundTransparency = 0.2
+    notifFrame.BorderSizePixel = 0
+    notifFrame.Parent = notifGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = notifFrame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = color or Color3.fromRGB(0, 200, 255)
+    stroke.Thickness = 2
+    stroke.Parent = notifFrame
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.GothamBold
+    label.TextScaled = true
+    label.Parent = notifFrame
+    
+    -- Animate in and out
+    notifFrame.Position = UDim2.new(0.3, 0, -0.1, 0)
+    TweenService:Create(notifFrame, TweenInfo.new(0.3, Enum.EasingStyle.Back), {
+        Position = UDim2.new(0.3, 0, 0.05, 0)
+    }):Play()
+    
+    task.delay(3, function()
+        TweenService:Create(notifFrame, TweenInfo.new(0.3), {
+            Position = UDim2.new(0.3, 0, -0.1, 0),
+            BackgroundTransparency = 1
+        }):Play()
+        task.wait(0.35)
+        notifGui:Destroy()
+    end)
+end
+
+-- =============================================
+-- INPUT HANDLING
+-- =============================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    -- Gun selection
+    if input.KeyCode == Enum.KeyCode.One then
+        if currentGun == 1 then
+            unequipCurrentGun()
+            updateGunSlotHighlight(0)
+            showNotification("❄️ Freeze Gun Unequipped", Color3.fromRGB(0, 200, 255))
+        else
+            equipGun(1)
+            updateGunSlotHighlight(1)
+            showNotification("❄️ Freeze Gun Equipped! Click to freeze NPCs", Color3.fromRGB(0, 200, 255))
+        end
+    end
+    
+    if input.KeyCode == Enum.KeyCode.Two then
+        if currentGun == 2 then
+            unequipCurrentGun()
+            updateGunSlotHighlight(0)
+            showNotification("✨ Channeling Gun Unequipped", Color3.fromRGB(255, 0, 255))
+        else
+            equipGun(2)
+            updateGunSlotHighlight(2)
+            showNotification("✨ Channeling Gun Equipped! Shoot NPCs or the SKY for global control!", Color3.fromRGB(255, 0, 255))
+        end
+    end
+    
+    if input.KeyCode == Enum.KeyCode.Three then
+        if currentGun == 3 then
+            unequipCurrentGun()
+            updateGunSlotHighlight(0)
+            showNotification("🔗 Mount Gun Unequipped", Color3.fromRGB(255, 140, 0))
+        else
+            equipGun(3)
+            updateGunSlotHighlight(3)
+            showNotification("🔗 Mount Gun Equipped! Shoot an NPC to ride it!", Color3.fromRGB(255, 140, 0))
+        end
+    end
+    
+    -- Shoot
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if currentGun == 1 and isEquipped then
+            shootFreezeGun()
+            isShootAnim = true
+        elseif currentGun == 2 and isEquipped then
+            shootChannelingGun()
+            isShootAnim = true
+        elseif currentGun == 3 and isEquipped then
+            shootMountGun()
+            isShootAnim = true
+        end
+    end
+    
+    -- Dismount
+    if input.KeyCode == Enum.KeyCode.E then
+        if isMounted then
+            dismountNPC()
+            showNotification("🐴 Dismounted!", Color3.fromRGB(255, 200, 0))
+        end
+    end
+    
+    -- Unfreeze nearest NPC (G key)
+    if input.KeyCode == Enum.KeyCode.G then
+        local unfrozen = false
+        for npc, data in pairs(frozenNPCs) do
+            if npc and npc.Parent then
+                local humanoid = npc:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    humanoid.WalkSpeed = data.walkSpeed
+                    humanoid.JumpPower = data.jumpPower
+                end
+                if data.parts then
+                    for _, sel in pairs(data.parts) do
+                        if sel and sel.Parent then sel:Destroy() end
+                    end
+                end
+                if data.attachment and data.attachment.Parent then
+                    data.attachment:Destroy()
+                end
+                frozenNPCs[npc] = nil
+                unfrozen = true
+                showNotification("🔓 NPC Unfrozen: " .. npc.Name, Color3.fromRGB(100, 220, 255))
+                break
+            end
+        end
+        if not unfrozen then
+            showNotification("No frozen NPCs nearby!", Color3.fromRGB(200, 100, 100))
+        end
+    end
+    
+    -- Revoke loyalty (R key when aiming at loyalist)
+    if input.KeyCode == Enum.KeyCode.R then
+        local mouse = Player:GetMouse()
+        if mouse.Target then
+            local model = mouse.Target:FindFirstAncestorOfClass("Model")
+            if model and loyalistNPCs[model] then
+                loyalistNPCs[model] = nil
+                
+                -- Remove crown
+                local hrp = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head")
+                if hrp then
+                    for _, v in pairs(hrp:GetChildren()) do
+                        if v:IsA("BillboardGui") then v:Destroy() end
+                    end
+                end
+                
+                showNotification("💔 Loyalty Revoked from: " .. model.Name, Color3.fromRGB(255, 80, 80))
+            end
+        end
+    end
+end)
+
+-- =============================================
+-- MAIN GAME LOOP
+-- =============================================
+local animFrameTimer = 0
+local animFrameIndex = 1
+local shootAnimFrameIndex = 1
+local shootAnimTimer = 0
+
+RunService.Heartbeat:Connect(function(dt)
+    -- Update stopmotion animation
+    animFrameTimer = animFrameTimer + dt
+    
+    -- Determine current animation based on player state
+    local currentAnimName = "idle"
+    if isMounted then
+        currentAnimName = "mount"
+    elseif Humanoid.MoveDirection.Magnitude > 0.1 then
+        currentAnimName = "walk"
+    end
+    
+    if isShootAnim then
+        -- Shoot animation overrides
+        shootAnimTimer = shootAnimTimer + dt
+        local shootData = customAnimations.shoot
+        if shootAnimTimer >= shootData.speed then
+            shootAnimTimer = 0
+            shootAnimFrameIndex = shootAnimFrameIndex + 1
+            if shootAnimFrameIndex > #shootData.frames then
+                shootAnimFrameIndex = 1
+                isShootAnim = false
+            end
+            applyStopMotionFrame("shoot", shootAnimFrameIndex)
+        end
+    else
+        -- Regular animations with stopmotion frames
+        local animData = customAnimations[currentAnimName]
+        if animData and animFrameTimer >= animData.speed then
+            animFrameTimer = 0
+            animFrameIndex = animFrameIndex % #animData.frames + 1
+            applyStopMotionFrame(currentAnimName, animFrameIndex)
+        end
+    end
+    
+    -- Update lip sync
+    updateLipSync(dt)
+    
+    -- Update stats display every 0.5 seconds
+    frameCounter = frameCounter + dt
+    if frameCounter >= 0.5 then
+        frameCounter = 0
+        updateStats()
+        
+        -- Cleanup dead NPCs from tables
+        for npc, _ in pairs(frozenNPCs) do
+            if not npc.Parent then
+                frozenNPCs[npc] = nil
+            end
+        end
+        for npc, _ in pairs(loyalistNPCs) do
+            if not npc.Parent then
+                loyalistNPCs[npc] = nil
+            end
+        end
+    end
+    
+    -- Keep gun weld animated (slight bob)
+    if gunWeld and isEquipped then
+        local t = tick()
+        gunWeld.C0 = CFrame.new(0, -1 + math.sin(t * 3) * 0.02, 0) * 
+            CFrame.Angles(math.rad(90 + math.sin(t * 2) * 1), 0, 0)
+    end
+end)
+
+-- =============================================
+-- CHARACTER RESPAWN HANDLING
+-- =============================================
+Player.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    
+    -- Wait for load
+    repeat task.wait() until newChar:FindFirstChild("HumanoidRootPart")
+    
+    Humanoid = newChar:WaitForChild("Humanoid")
+    HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
+    Head = newChar:WaitForChild("Head")
+    Torso = newChar:FindFirstChild("Torso") or newChar:FindFirstChild("UpperTorso")
+    LeftArm = newChar:FindFirstChild("Left Arm") or newChar:FindFirstChild("LeftUpperArm")
+    RightArm = newChar:FindFirstChild("Right Arm") or newChar:FindFirstChild("RightUpperArm")
+    
+    -- Reset state
+    frozenNPCs = {}
+    loyalistNPCs = {}
+    isMounted = false
+    mountedNPC = nil
+    equippedGunModel = nil
+    gunWeld = nil
+    isEquipped = false
+    currentGun = nil
+    
+    updateGunSlotHighlight(0)
+    
+    -- Recreate mouth
+    task.wait(1)
+    setupMotors()
+    
+    -- Recreate mouth gui
+    local newHead = newChar:FindFirstChild("Head")
+    if newHead then
+        local newMouthGui = Instance.new("BillboardGui")
+        newMouthGui.Size = UDim2.new(1.5, 0, 0.5, 0)
+        newMouthGui.StudsOffset = Vector3.new(0, -0.4, 0.51)
+        newMouthGui.Parent = newHead
+        
+        local newMouthFrame = Instance.new("Frame")
+        newMouthFrame.Size = UDim2.new(0.5, 0, 0.4, 0)
+        newMouthFrame.Position = UDim2.new(0.25, 0, 0.3, 0)
+        newMouthFrame.BackgroundColor3 = Color3.fromRGB(20, 10, 10)
+        newMouthFrame.BorderSizePixel = 2
+        newMouthFrame.Parent = newMouthGui
+    end
+    
+    showNotification("⚡ NPC Master Active! [1] Freeze [2] Channel [3] Mount", Color3.fromRGB(0, 220, 255))
+end)
+
+-- =============================================
+-- STARTUP
+-- =============================================
+task.spawn(function()
+    task.wait(1)
+    showNotification("⚡ NPC MASTER LOADED! Press 1, 2, or 3 to equip guns!", Color3.fromRGB(0, 220, 255))
+    task.wait(4)
+    showNotification("❄️[1] Freeze  ✨[2] Channel/Sky Control  🔗[3] Mount NPCs", Color3.fromRGB(200, 200, 255))
+    task.wait(4)
+    showNotification("💡 [G] Unfreeze NPC | [R] Revoke Loyalty | [E] Dismount", Color3.fromRGB(200, 255, 200))
+end)
+
+print("=================================")
+print("  THE NPC MASTER - LOADED!")
+print("  [1] Freeze Gun - Freeze NPCs")
+print("  [2] Channeling Gun - Make Loyalists")
+print("       (Shoot SKY for global control!)")
+print("  [3] Mount Gun - Ride NPCs")
+print("  [G] Unfreeze | [R] Revoke | [E] Dismount")
+print("=================================")
