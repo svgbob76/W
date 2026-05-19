@@ -1,0 +1,2347 @@
+-- MANHUNT ACROSS ROBLOX
+-- StarterPlayerScript - Local Script
+-- Place this in StarterPlayerScripts
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
+local Workspace = game:GetService("Workspace")
+local PathfindingService = game:GetService("PathfindingService")
+local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
+local Chat = game:GetService("Chat")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer.PlayerGui
+local Camera = Workspace.CurrentCamera
+
+-- ============================================================
+-- CONFIGURATION
+-- ============================================================
+
+local CONFIG = {
+    -- Hunter Settings
+    HUNTERS = {
+        {
+            Name = "SHADOW",
+            DisplayName = "𝕊𝕙𝕒𝕕𝕠𝕬",
+            Description = "The Silent Predator\nMoves without sound. Sees through darkness.",
+            Color = Color3.fromRGB(80, 0, 120),
+            SecondaryColor = Color3.fromRGB(200, 0, 255),
+            BodyColors = {
+                Head = Color3.fromRGB(30, 0, 50),
+                Torso = Color3.fromRGB(20, 0, 40),
+                Arms = Color3.fromRGB(25, 0, 45),
+                Legs = Color3.fromRGB(15, 0, 35),
+            },
+            Ability = "SHADOW_STEP",
+            AbilityCooldown = 8,
+            AbilityDescription = "Teleports behind target",
+            Speed = 22,
+            Health = 150,
+            Tools = {"Obsidian Blade", "Smoke Bomb", "Shadow Compass"},
+            Personality = "aggressive",
+        },
+        {
+            Name = "PHANTOM",
+            DisplayName = "ℙ𝕙𝕒𝕟𝕥𝕠𝕞",
+            Description = "The Ghost Walker\nPasses through obstacles. Never tires.",
+            Color = Color3.fromRGB(0, 100, 150),
+            SecondaryColor = Color3.fromRGB(0, 200, 255),
+            BodyColors = {
+                Head = Color3.fromRGB(0, 40, 60),
+                Torso = Color3.fromRGB(0, 30, 50),
+                Arms = Color3.fromRGB(0, 35, 55),
+                Legs = Color3.fromRGB(0, 25, 45),
+            },
+            Ability = "PHASE_WALK",
+            AbilityCooldown = 12,
+            AbilityDescription = "Phases through walls for 3 seconds",
+            Speed = 20,
+            Health = 125,
+            Tools = {"Spectral Spear", "Phase Grenade", "Echo Tracker"},
+            Personality = "strategic",
+        },
+        {
+            Name = "WRAITH",
+            DisplayName = "𝕎𝕣𝕒𝕚𝕥𝕙",
+            Description = "The Eternal Hunter\nNever gives up. Never forgives.",
+            Color = Color3.fromRGB(150, 0, 0),
+            SecondaryColor = Color3.fromRGB(255, 50, 0),
+            BodyColors = {
+                Head = Color3.fromRGB(60, 0, 0),
+                Torso = Color3.fromRGB(50, 0, 0),
+                Arms = Color3.fromRGB(55, 0, 0),
+                Legs = Color3.fromRGB(45, 0, 0),
+            },
+            Ability = "BLOOD_RAGE",
+            AbilityCooldown = 15,
+            AbilityDescription = "Doubles speed and damage for 5 seconds",
+            Speed = 24,
+            Health = 175,
+            Tools = {"Infernal Axe", "Rage Totem", "Heat Seeker"},
+            Personality = "relentless",
+        },
+    },
+
+    -- Game Settings
+    INTRO_DURATION = 12,
+    HUNT_START_DELAY = 30,
+    COMPASS_UPDATE_RATE = 0.1,
+    AI_UPDATE_RATE = 0.5,
+    LEARNING_RATE = 0.1,
+
+    -- Sound IDs (Use free Roblox sounds)
+    SOUNDS = {
+        HEARTBEAT = 507254835,
+        FOOTSTEP = 142082166,
+        WHOOSH = 507254851,
+        DRAMATIC = 507254858,
+        AMBIENT = 507254862,
+        ABILITY = 507254893,
+        HUNT_START = 507254898,
+        COMPASS_PING = 142082164,
+        DEATH = 507254870,
+    },
+}
+
+-- ============================================================
+-- STATE MANAGEMENT
+-- ============================================================
+
+local GameState = {
+    Phase = "LOADING", -- LOADING, INTRO, COUNTDOWN, HUNTING, CAUGHT, ESCAPED
+    Hunters = {},
+    PlayerData = {
+        Position = Vector3.new(0,0,0),
+        LastPositions = {},
+        MovementPattern = {},
+        FavoriteLocations = {},
+        EscapeRoutes = {},
+        ItemsUsed = {},
+        CombatStyle = "unknown",
+        TimeAlive = 0,
+        Panics = 0,
+        HidingFrequency = 0,
+    },
+    CompassAngle = 0,
+    HuntStartTime = 0,
+    HeadStartTimer = CONFIG.HUNT_START_DELAY,
+    IsIntroPlaying = false,
+    UIElements = {},
+}
+
+-- ============================================================
+-- UTILITY FUNCTIONS
+-- ============================================================
+
+local function CreateSound(id, volume, pitch, looped)
+    local sound = Instance.new("Sound")
+    sound.SoundId = "rbxassetid://" .. id
+    sound.Volume = volume or 1
+    sound.PlaybackSpeed = pitch or 1
+    sound.Looped = looped or false
+    sound.Parent = SoundService
+    return sound
+end
+
+local function Lerp(a, b, t)
+    return a + (b - a) * t
+end
+
+local function LerpColor(a, b, t)
+    return Color3.new(
+        Lerp(a.R, b.R, t),
+        Lerp(a.G, b.G, t),
+        Lerp(a.B, b.B, t)
+    )
+end
+
+local function CreateTween(obj, props, duration, style, direction)
+    local info = TweenInfo.new(
+        duration or 0.5,
+        style or Enum.EasingStyle.Quad,
+        direction or Enum.EasingDirection.Out
+    )
+    return TweenService:Create(obj, info, props)
+end
+
+local function WaitForCharacter()
+    if not LocalPlayer.Character then
+        LocalPlayer.CharacterAdded:Wait()
+    end
+    local char = LocalPlayer.Character
+    if not char:FindFirstChild("HumanoidRootPart") then
+        char.ChildAdded:Wait()
+    end
+    return char
+end
+
+-- ============================================================
+-- UI CREATION SYSTEM
+-- ============================================================
+
+local UIManager = {}
+
+function UIManager:Init()
+    -- Remove existing manhunt GUI
+    if PlayerGui:FindFirstChild("ManhuntUI") then
+        PlayerGui.ManhuntUI:Destroy()
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "ManhuntUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.IgnoreGuiInset = true
+    screenGui.Parent = PlayerGui
+
+    GameState.UIElements.ScreenGui = screenGui
+    self:CreateIntroScreen()
+    self:CreateHUDElements()
+    self:CreateCompass()
+    self:CreateHunterStatusPanel()
+    self:CreateHeartbeatEffect()
+
+    return screenGui
+end
+
+function UIManager:CreateIntroScreen()
+    local screenGui = GameState.UIElements.ScreenGui
+
+    -- Full blackout overlay
+    local blackout = Instance.new("Frame")
+    blackout.Name = "Blackout"
+    blackout.Size = UDim2.new(1, 0, 1, 0)
+    blackout.Position = UDim2.new(0, 0, 0, 0)
+    blackout.BackgroundColor3 = Color3.new(0, 0, 0)
+    blackout.BackgroundTransparency = 0
+    blackout.ZIndex = 100
+    blackout.Parent = screenGui
+    GameState.UIElements.Blackout = blackout
+
+    -- Cinematic bars
+    local topBar = Instance.new("Frame")
+    topBar.Name = "TopBar"
+    topBar.Size = UDim2.new(1, 0, 0.12, 0)
+    topBar.Position = UDim2.new(0, 0, -0.12, 0)
+    topBar.BackgroundColor3 = Color3.new(0, 0, 0)
+    topBar.BackgroundTransparency = 0
+    topBar.ZIndex = 90
+    topBar.Parent = screenGui
+    GameState.UIElements.TopBar = topBar
+
+    local bottomBar = Instance.new("Frame")
+    bottomBar.Name = "BottomBar"
+    bottomBar.Size = UDim2.new(1, 0, 0.12, 0)
+    bottomBar.Position = UDim2.new(0, 0, 1.12, 0)
+    bottomBar.BackgroundColor3 = Color3.new(0, 0, 0)
+    bottomBar.BackgroundTransparency = 0
+    bottomBar.ZIndex = 90
+    bottomBar.Parent = screenGui
+    GameState.UIElements.BottomBar = bottomBar
+
+    -- Title container
+    local titleContainer = Instance.new("Frame")
+    titleContainer.Name = "TitleContainer"
+    titleContainer.Size = UDim2.new(1, 0, 1, 0)
+    titleContainer.Position = UDim2.new(0, 0, 0, 0)
+    titleContainer.BackgroundTransparency = 1
+    titleContainer.ZIndex = 101
+    titleContainer.Visible = false
+    titleContainer.Parent = screenGui
+    GameState.UIElements.TitleContainer = titleContainer
+
+    -- Main title
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "TitleLabel"
+    titleLabel.Size = UDim2.new(0.8, 0, 0.15, 0)
+    titleLabel.Position = UDim2.new(0.1, 0, 0.35, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+    titleLabel.TextScaled = true
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.Text = ""
+    titleLabel.TextStrokeTransparency = 0
+    titleLabel.TextStrokeColor3 = Color3.fromRGB(100, 0, 0)
+    titleLabel.ZIndex = 102
+    titleLabel.Parent = titleContainer
+
+    -- Subtitle
+    local subtitleLabel = Instance.new("TextLabel")
+    subtitleLabel.Name = "SubtitleLabel"
+    subtitleLabel.Size = UDim2.new(0.8, 0, 0.06, 0)
+    subtitleLabel.Position = UDim2.new(0.1, 0, 0.51, 0)
+    subtitleLabel.BackgroundTransparency = 1
+    subtitleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    subtitleLabel.TextScaled = true
+    subtitleLabel.Font = Enum.Font.Gotham
+    subtitleLabel.Text = ""
+    subtitleLabel.ZIndex = 102
+    subtitleLabel.Parent = titleContainer
+
+    -- Red accent line
+    local accentLine = Instance.new("Frame")
+    accentLine.Name = "AccentLine"
+    accentLine.Size = UDim2.new(0, 0, 0, 3)
+    accentLine.Position = UDim2.new(0.1, 0, 0.505, 0)
+    accentLine.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+    accentLine.BorderSizePixel = 0
+    accentLine.ZIndex = 102
+    accentLine.Parent = titleContainer
+    GameState.UIElements.AccentLine = accentLine
+
+    -- Hunter introduction card
+    local hunterCard = Instance.new("Frame")
+    hunterCard.Name = "HunterCard"
+    hunterCard.Size = UDim2.new(0.5, 0, 0.35, 0)
+    hunterCard.Position = UDim2.new(1.1, 0, 0.55, 0)
+    hunterCard.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+    hunterCard.BackgroundTransparency = 0.2
+    hunterCard.BorderSizePixel = 0
+    hunterCard.ZIndex = 101
+    hunterCard.Parent = titleContainer
+
+    -- Card corner accent
+    local cardAccent = Instance.new("Frame")
+    cardAccent.Size = UDim2.new(1, 0, 0, 4)
+    cardAccent.Position = UDim2.new(0, 0, 0, 0)
+    cardAccent.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+    cardAccent.BorderSizePixel = 0
+    cardAccent.ZIndex = 102
+    cardAccent.Parent = hunterCard
+    GameState.UIElements.CardAccent = cardAccent
+
+    local hunterName = Instance.new("TextLabel")
+    hunterName.Name = "HunterName"
+    hunterName.Size = UDim2.new(1, -20, 0.35, 0)
+    hunterName.Position = UDim2.new(0, 10, 0.05, 0)
+    hunterName.BackgroundTransparency = 1
+    hunterName.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hunterName.TextScaled = true
+    hunterName.Font = Enum.Font.GothamBold
+    hunterName.Text = ""
+    hunterName.TextXAlignment = Enum.TextXAlignment.Left
+    hunterName.ZIndex = 102
+    hunterName.Parent = hunterCard
+
+    local hunterDesc = Instance.new("TextLabel")
+    hunterDesc.Name = "HunterDesc"
+    hunterDesc.Size = UDim2.new(1, -20, 0.45, 0)
+    hunterDesc.Position = UDim2.new(0, 10, 0.4, 0)
+    hunterDesc.BackgroundTransparency = 1
+    hunterDesc.TextColor3 = Color3.fromRGB(180, 180, 180)
+    hunterDesc.TextScaled = true
+    hunterDesc.Font = Enum.Font.Gotham
+    hunterDesc.Text = ""
+    hunterDesc.TextXAlignment = Enum.TextXAlignment.Left
+    hunterDesc.TextWrapped = true
+    hunterDesc.ZIndex = 102
+    hunterDesc.Parent = hunterCard
+
+    local hunterAbility = Instance.new("TextLabel")
+    hunterAbility.Name = "HunterAbility"
+    hunterAbility.Size = UDim2.new(1, -20, 0.2, 0)
+    hunterAbility.Position = UDim2.new(0, 10, 0.8, 0)
+    hunterAbility.BackgroundTransparency = 1
+    hunterAbility.TextColor3 = Color3.fromRGB(255, 200, 0)
+    hunterAbility.TextScaled = true
+    hunterAbility.Font = Enum.Font.GothamBold
+    hunterAbility.Text = ""
+    hunterAbility.TextXAlignment = Enum.TextXAlignment.Left
+    hunterAbility.ZIndex = 102
+    hunterAbility.Parent = hunterCard
+
+    GameState.UIElements.HunterCard = hunterCard
+    GameState.UIElements.HunterName = hunterName
+    GameState.UIElements.HunterDesc = hunterDesc
+    GameState.UIElements.HunterAbility = hunterAbility
+    GameState.UIElements.TitleLabel = titleLabel
+    GameState.UIElements.SubtitleLabel = subtitleLabel
+
+    -- Hunter number indicator
+    local hunterNum = Instance.new("TextLabel")
+    hunterNum.Name = "HunterNum"
+    hunterNum.Size = UDim2.new(0.15, 0, 0.06, 0)
+    hunterNum.Position = UDim2.new(0.05, 0, 0.56, 0)
+    hunterNum.BackgroundTransparency = 1
+    hunterNum.TextColor3 = Color3.fromRGB(255, 50, 50)
+    hunterNum.TextScaled = true
+    hunterNum.Font = Enum.Font.GothamBold
+    hunterNum.Text = ""
+    hunterNum.ZIndex = 102
+    hunterNum.Parent = titleContainer
+    GameState.UIElements.HunterNum = hunterNum
+end
+
+function UIManager:CreateHUDElements()
+    local screenGui = GameState.UIElements.ScreenGui
+
+    -- HUD Container (hidden initially)
+    local hudContainer = Instance.new("Frame")
+    hudContainer.Name = "HUDContainer"
+    hudContainer.Size = UDim2.new(1, 0, 1, 0)
+    hudContainer.BackgroundTransparency = 1
+    hudContainer.Visible = false
+    hudContainer.ZIndex = 50
+    hudContainer.Parent = screenGui
+    GameState.UIElements.HUDContainer = hudContainer
+
+    -- Danger vignette
+    local vignette = Instance.new("ImageLabel")
+    vignette.Name = "Vignette"
+    vignette.Size = UDim2.new(1, 0, 1, 0)
+    vignette.Position = UDim2.new(0, 0, 0, 0)
+    vignette.BackgroundTransparency = 1
+    vignette.Image = "rbxassetid://1393939"
+    vignette.ImageColor3 = Color3.fromRGB(200, 0, 0)
+    vignette.ImageTransparency = 1
+    vignette.ZIndex = 60
+    vignette.Parent = screenGui
+    GameState.UIElements.Vignette = vignette
+
+    -- Head start countdown
+    local countdownFrame = Instance.new("Frame")
+    countdownFrame.Name = "CountdownFrame"
+    countdownFrame.Size = UDim2.new(0.3, 0, 0.12, 0)
+    countdownFrame.Position = UDim2.new(0.35, 0, 0.08, 0)
+    countdownFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    countdownFrame.BackgroundTransparency = 0.4
+    countdownFrame.BorderSizePixel = 0
+    countdownFrame.ZIndex = 51
+    countdownFrame.Visible = false
+    countdownFrame.Parent = hudContainer
+
+    local countdownCorner = Instance.new("UICorner")
+    countdownCorner.CornerRadius = UDim.new(0, 8)
+    countdownCorner.Parent = countdownFrame
+
+    local countdownBorder = Instance.new("UIStroke")
+    countdownBorder.Color = Color3.fromRGB(255, 200, 0)
+    countdownBorder.Thickness = 2
+    countdownBorder.Parent = countdownFrame
+
+    local countdownLabel = Instance.new("TextLabel")
+    countdownLabel.Name = "CountdownLabel"
+    countdownLabel.Size = UDim2.new(1, 0, 1, 0)
+    countdownLabel.BackgroundTransparency = 1
+    countdownLabel.TextColor3 = Color3.fromRGB(255, 200, 0)
+    countdownLabel.TextScaled = true
+    countdownLabel.Font = Enum.Font.GothamBold
+    countdownLabel.Text = "HEAD START: 30s"
+    countdownLabel.ZIndex = 52
+    countdownLabel.Parent = countdownFrame
+    GameState.UIElements.CountdownFrame = countdownFrame
+    GameState.UIElements.CountdownLabel = countdownLabel
+
+    -- Hunting notification
+    local huntingAlert = Instance.new("Frame")
+    huntingAlert.Name = "HuntingAlert"
+    huntingAlert.Size = UDim2.new(0.4, 0, 0.08, 0)
+    huntingAlert.Position = UDim2.new(0.3, 0, 0.45, 0)
+    huntingAlert.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
+    huntingAlert.BackgroundTransparency = 1
+    huntingAlert.BorderSizePixel = 0
+    huntingAlert.ZIndex = 70
+    huntingAlert.Visible = false
+    huntingAlert.Parent = screenGui
+
+    local huntCorner = Instance.new("UICorner")
+    huntCorner.CornerRadius = UDim.new(0, 6)
+    huntCorner.Parent = huntingAlert
+
+    local huntLabel = Instance.new("TextLabel")
+    huntLabel.Name = "HuntLabel"
+    huntLabel.Size = UDim2.new(1, 0, 1, 0)
+    huntLabel.BackgroundTransparency = 1
+    huntLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+    huntLabel.TextScaled = true
+    huntLabel.Font = Enum.Font.GothamBold
+    huntLabel.Text = "⚠ THE HUNT BEGINS ⚠"
+    huntLabel.ZIndex = 71
+    huntLabel.Parent = huntingAlert
+    GameState.UIElements.HuntingAlert = huntingAlert
+    GameState.UIElements.HuntLabel = huntLabel
+
+    -- Timer display
+    local timerFrame = Instance.new("Frame")
+    timerFrame.Name = "TimerFrame"
+    timerFrame.Size = UDim2.new(0.15, 0, 0.06, 0)
+    timerFrame.Position = UDim2.new(0.425, 0, 0.02, 0)
+    timerFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    timerFrame.BackgroundTransparency = 0.5
+    timerFrame.BorderSizePixel = 0
+    timerFrame.ZIndex = 51
+    timerFrame.Visible = false
+    timerFrame.Parent = hudContainer
+
+    local timerCorner = Instance.new("UICorner")
+    timerCorner.CornerRadius = UDim.new(0, 6)
+    timerCorner.Parent = timerFrame
+
+    local timerLabel = Instance.new("TextLabel")
+    timerLabel.Name = "TimerLabel"
+    timerLabel.Size = UDim2.new(1, 0, 1, 0)
+    timerLabel.BackgroundTransparency = 1
+    timerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    timerLabel.TextScaled = true
+    timerLabel.Font = Enum.Font.GothamBold
+    timerLabel.Text = "00:00"
+    timerLabel.ZIndex = 52
+    timerLabel.Parent = timerFrame
+    GameState.UIElements.TimerFrame = timerFrame
+    GameState.UIElements.TimerLabel = timerLabel
+end
+
+function UIManager:CreateCompass()
+    local screenGui = GameState.UIElements.ScreenGui
+    local hudContainer = GameState.UIElements.HUDContainer
+
+    -- Compass frame
+    local compassFrame = Instance.new("Frame")
+    compassFrame.Name = "CompassFrame"
+    compassFrame.Size = UDim2.new(0.18, 0, 0.18, 0)
+    compassFrame.Position = UDim2.new(0.01, 0, 0.8, 0)
+    compassFrame.BackgroundColor3 = Color3.fromRGB(5, 5, 5)
+    compassFrame.BackgroundTransparency = 0.3
+    compassFrame.BorderSizePixel = 0
+    compassFrame.ZIndex = 52
+    compassFrame.Parent = hudContainer
+
+    local compassCorner = Instance.new("UICorner")
+    compassCorner.CornerRadius = UDim.new(1, 0)
+    compassCorner.Parent = compassFrame
+
+    local compassBorder = Instance.new("UIStroke")
+    compassBorder.Color = Color3.fromRGB(255, 50, 50)
+    compassBorder.Thickness = 3
+    compassBorder.Parent = compassFrame
+
+    -- Compass needle (skull tracker)
+    local compassNeedle = Instance.new("Frame")
+    compassNeedle.Name = "CompassNeedle"
+    compassNeedle.Size = UDim2.new(0.06, 0, 0.45, 0)
+    compassNeedle.Position = UDim2.new(0.47, 0, 0.05, 0)
+    compassNeedle.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+    compassNeedle.BorderSizePixel = 0
+    compassNeedle.ZIndex = 54
+    compassNeedle.AnchorPoint = Vector2.new(0.5, 1)
+    compassNeedle.Parent = compassFrame
+
+    -- Compass center dot
+    local centerDot = Instance.new("Frame")
+    centerDot.Size = UDim2.new(0.12, 0, 0.12, 0)
+    centerDot.Position = UDim2.new(0.44, 0, 0.44, 0)
+    centerDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    centerDot.BorderSizePixel = 0
+    centerDot.ZIndex = 55
+    centerDot.Parent = compassFrame
+
+    local centerCorner = Instance.new("UICorner")
+    centerCorner.CornerRadius = UDim.new(1, 0)
+    centerCorner.Parent = centerDot
+
+    -- Compass label
+    local compassLabel = Instance.new("TextLabel")
+    compassLabel.Size = UDim2.new(1, 0, 0.25, 0)
+    compassLabel.Position = UDim2.new(0, 0, -0.28, 0)
+    compassLabel.BackgroundTransparency = 1
+    compassLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+    compassLabel.TextScaled = true
+    compassLabel.Font = Enum.Font.GothamBold
+    compassLabel.Text = "☠ HUNTERS"
+    compassLabel.ZIndex = 53
+    compassLabel.Parent = compassFrame
+
+    -- Distance label
+    local distLabel = Instance.new("TextLabel")
+    distLabel.Name = "DistLabel"
+    distLabel.Size = UDim2.new(1, 0, 0.22, 0)
+    distLabel.Position = UDim2.new(0, 0, 1.02, 0)
+    distLabel.BackgroundTransparency = 1
+    distLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    distLabel.TextScaled = true
+    distLabel.Font = Enum.Font.Gotham
+    distLabel.Text = "??? studs"
+    distLabel.ZIndex = 53
+    distLabel.Parent = compassFrame
+    GameState.UIElements.DistLabel = distLabel
+
+    GameState.UIElements.CompassFrame = compassFrame
+    GameState.UIElements.CompassNeedle = compassNeedle
+end
+
+function UIManager:CreateHunterStatusPanel()
+    local hudContainer = GameState.UIElements.HUDContainer
+
+    local statusPanel = Instance.new("Frame")
+    statusPanel.Name = "StatusPanel"
+    statusPanel.Size = UDim2.new(0.22, 0, 0.28, 0)
+    statusPanel.Position = UDim2.new(0.77, 0, 0.02, 0)
+    statusPanel.BackgroundColor3 = Color3.fromRGB(5, 5, 5)
+    statusPanel.BackgroundTransparency = 0.4
+    statusPanel.BorderSizePixel = 0
+    statusPanel.ZIndex = 52
+    statusPanel.Parent = hudContainer
+
+    local panelCorner = Instance.new("UICorner")
+    panelCorner.CornerRadius = UDim.new(0, 8)
+    panelCorner.Parent = statusPanel
+
+    local panelBorder = Instance.new("UIStroke")
+    panelBorder.Color = Color3.fromRGB(255, 50, 50)
+    panelBorder.Thickness = 2
+    panelBorder.Parent = statusPanel
+
+    local panelTitle = Instance.new("TextLabel")
+    panelTitle.Size = UDim2.new(1, 0, 0.15, 0)
+    panelTitle.BackgroundTransparency = 1
+    panelTitle.TextColor3 = Color3.fromRGB(255, 50, 50)
+    panelTitle.TextScaled = true
+    panelTitle.Font = Enum.Font.GothamBold
+    panelTitle.Text = "☠ HUNTERS"
+    panelTitle.ZIndex = 53
+    panelTitle.Parent = statusPanel
+
+    -- Hunter entries
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Padding = UDim.new(0, 4)
+    listLayout.Parent = statusPanel
+
+    GameState.UIElements.StatusPanel = statusPanel
+
+    for i, hunterData in ipairs(CONFIG.HUNTERS) do
+        local entry = Instance.new("Frame")
+        entry.Name = "Hunter_" .. i
+        entry.Size = UDim2.new(1, -10, 0, 45)
+        entry.BackgroundColor3 = Color3.fromRGB(20, 5, 5)
+        entry.BackgroundTransparency = 0.3
+        entry.BorderSizePixel = 0
+        entry.LayoutOrder = i + 1
+        entry.ZIndex = 53
+
+        local eCorner = Instance.new("UICorner")
+        eCorner.CornerRadius = UDim.new(0, 4)
+        eCorner.Parent = entry
+
+        local eAccent = Instance.new("Frame")
+        eAccent.Size = UDim2.new(0, 4, 1, 0)
+        eAccent.BackgroundColor3 = hunterData.Color
+        eAccent.BorderSizePixel = 0
+        eAccent.ZIndex = 54
+        eAccent.Parent = entry
+
+        local eAccentCorner = Instance.new("UICorner")
+        eAccentCorner.CornerRadius = UDim.new(0, 4)
+        eAccentCorner.Parent = eAccent
+
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(0.7, 0, 0.5, 0)
+        nameLabel.Position = UDim2.new(0.1, 0, 0, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.TextColor3 = Color3.new(1, 1, 1)
+        nameLabel.TextScaled = true
+        nameLabel.Font = Enum.Font.GothamBold
+        nameLabel.Text = hunterData.Name
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.ZIndex = 54
+        nameLabel.Parent = entry
+
+        local statusLabel = Instance.new("TextLabel")
+        statusLabel.Name = "StatusLabel"
+        statusLabel.Size = UDim2.new(0.9, 0, 0.45, 0)
+        statusLabel.Position = UDim2.new(0.1, 0, 0.5, 0)
+        statusLabel.BackgroundTransparency = 1
+        statusLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+        statusLabel.TextScaled = true
+        statusLabel.Font = Enum.Font.Gotham
+        statusLabel.Text = "Waiting..."
+        statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+        statusLabel.ZIndex = 54
+        statusLabel.Parent = entry
+
+        local padding = Instance.new("UIPadding")
+        padding.PaddingLeft = UDim.new(0, 5)
+        padding.PaddingTop = UDim.new(0, 2)
+        padding.Parent = entry
+
+        entry.Parent = statusPanel
+        GameState.UIElements["HunterEntry_" .. i] = entry
+        GameState.UIElements["HunterStatus_" .. i] = statusLabel
+    end
+end
+
+function UIManager:CreateHeartbeatEffect()
+    local screenGui = GameState.UIElements.ScreenGui
+
+    local heartbeat = Instance.new("Frame")
+    heartbeat.Name = "HeartbeatFrame"
+    heartbeat.Size = UDim2.new(1, 0, 1, 0)
+    heartbeat.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+    heartbeat.BackgroundTransparency = 1
+    heartbeat.BorderSizePixel = 0
+    heartbeat.ZIndex = 80
+    heartbeat.Visible = false
+    heartbeat.Parent = screenGui
+    GameState.UIElements.HeartbeatFrame = heartbeat
+end
+
+-- ============================================================
+-- TEXT ANIMATION SYSTEM
+-- ============================================================
+
+local TextAnimator = {}
+
+function TextAnimator:TypeWrite(label, text, speed, color)
+    label.Text = ""
+    local displayed = ""
+    speed = speed or 0.05
+    color = color or label.TextColor3
+
+    for i = 1, #text do
+        local char = text:sub(i, i)
+        displayed = displayed .. char
+        label.Text = displayed
+        label.TextColor3 = color
+        if char ~= " " and char ~= "\n" then
+            task.wait(speed)
+        end
+    end
+end
+
+function TextAnimator:GlitchReveal(label, finalText, duration)
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*"
+    local steps = math.floor(duration / 0.05)
+
+    for step = 1, steps do
+        local revealed = math.floor((step / steps) * #finalText)
+        local glitched = ""
+
+        for i = 1, #finalText do
+            if i <= revealed then
+                glitched = glitched .. finalText:sub(i, i)
+            else
+                glitched = glitched .. chars:sub(math.random(1, #chars), math.random(1, #chars))
+            end
+        end
+
+        label.Text = glitched
+        task.wait(0.05)
+    end
+
+    label.Text = finalText
+end
+
+function TextAnimator:FlashText(label, text, times, interval, color1, color2)
+    for i = 1, times do
+        label.Text = text
+        label.TextColor3 = color1 or Color3.fromRGB(255, 50, 50)
+        task.wait(interval)
+        label.TextColor3 = color2 or Color3.fromRGB(255, 200, 200)
+        task.wait(interval)
+    end
+    label.TextColor3 = color1 or Color3.fromRGB(255, 50, 50)
+end
+
+-- ============================================================
+-- CAMERA SYSTEM
+-- ============================================================
+
+local CameraController = {}
+CameraController.OriginalCFrame = CFrame.new()
+CameraController.OriginalType = Enum.CameraType.Custom
+
+function CameraController:SaveState()
+    self.OriginalCFrame = Camera.CFrame
+    self.OriginalType = Camera.CameraType
+end
+
+function CameraController:SetCinematic()
+    Camera.CameraType = Enum.CameraType.Scriptable
+end
+
+function CameraController:Restore()
+    Camera.CameraType = self.OriginalType
+end
+
+function CameraController:MoveTo(targetCFrame, duration, style)
+    local tween = CreateTween(Camera, {CFrame = targetCFrame}, duration, style or Enum.EasingStyle.Sine)
+    tween:Play()
+    task.wait(duration)
+end
+
+function CameraController:Shake(intensity, duration)
+    local elapsed = 0
+    while elapsed < duration do
+        local dt = task.wait()
+        elapsed = elapsed + dt
+        local falloff = 1 - (elapsed / duration)
+        local offset = Vector3.new(
+            (math.random() - 0.5) * intensity * falloff,
+            (math.random() - 0.5) * intensity * falloff,
+            (math.random() - 0.5) * intensity * falloff
+        )
+        Camera.CFrame = Camera.CFrame * CFrame.new(offset)
+    end
+end
+
+function CameraController:SweepToHunter(hunterModel, duration)
+    if not hunterModel then return end
+
+    local rootPart = hunterModel:FindFirstChild("HumanoidRootPart") or hunterModel.PrimaryPart
+    if not rootPart then return end
+
+    -- Start position: dramatic low angle
+    local startPos = rootPart.Position + Vector3.new(15, 3, 15)
+    local endPos = rootPart.Position + Vector3.new(5, 8, 5)
+
+    Camera.CFrame = CFrame.new(startPos, rootPart.Position)
+
+    -- Smooth sweep
+    local steps = duration / 0.016
+    for i = 1, steps do
+        local t = i / steps
+        local eased = 1 - (1 - t) ^ 3 -- Ease out cubic
+        local pos = startPos:Lerp(endPos, eased)
+        Camera.CFrame = CFrame.new(pos, rootPart.Position)
+        task.wait(0.016)
+    end
+end
+
+-- ============================================================
+-- HUNTER AI SYSTEM
+-- ============================================================
+
+local HunterAI = {}
+
+function HunterAI:New(hunterConfig, model)
+    local ai = {
+        Config = hunterConfig,
+        Model = model,
+        State = "PATROL",
+        -- AI States: PATROL, CHASE, SEARCH, FLANK, ABILITY, INVESTIGATE
+        LastKnownPlayerPos = nil,
+        SearchPositions = {},
+        LearnedData = {
+            PlayerSpeed = 16,
+            PlayerFavoriteAreas = {},
+            PlayerEscapeDirection = Vector3.new(0,0,0),
+            PlayerCombatStyle = "runner",
+            TimesBehindPlayer = 0,
+            PlayerHidingSpots = {},
+            SuccessfulFlankPositions = {},
+            PlayerItemUsage = {},
+            LastCaughtAttempt = 0,
+        },
+        AbilityCooldown = 0,
+        TargetPath = nil,
+        CurrentWaypoint = 1,
+        Alertness = 0,
+        Memory = {}, -- Remember locations, items, events
+        IsRaging = false, -- For WRAITH
+        IsPhasing = false, -- For PHANTOM
+        IsShadowing = false, -- For SHADOW
+        AdaptationScore = 0,
+        StatusText = "Waiting...",
+        Tools = {},
+        ItemSeen = nil,
+        ItemCooldown = 0,
+    }
+
+    setmetatable(ai, {__index = HunterAI})
+    return ai
+end
+
+function HunterAI:UpdateLearning(playerPos, playerVelocity)
+    local data = self.LearnedData
+
+    -- Learn player speed
+    local speed = playerVelocity.Magnitude
+    data.PlayerSpeed = Lerp(data.PlayerSpeed, speed, CONFIG.LEARNING_RATE)
+
+    -- Learn favorite areas
+    local area = Vector3.new(
+        math.floor(playerPos.X / 20) * 20,
+        0,
+        math.floor(playerPos.Z / 20) * 20
+    )
+    local areaKey = tostring(area)
+
+    if not data.PlayerFavoriteAreas[areaKey] then
+        data.PlayerFavoriteAreas[areaKey] = {Position = area, Visits = 0, IsHidingSpot = false}
+    end
+    data.PlayerFavoriteAreas[areaKey].Visits = data.PlayerFavoriteAreas[areaKey].Visits + 1
+
+    -- Detect hiding behavior
+    if speed < 2 then
+        data.PlayerFavoriteAreas[areaKey].IsHidingSpot = true
+        self.Alertness = math.min(100, self.Alertness + 5)
+    end
+
+    -- Learn escape direction
+    if self.LastKnownPlayerPos then
+        local escapeDir = (playerPos - self.LastKnownPlayerPos).Unit
+        data.PlayerEscapeDirection = data.PlayerEscapeDirection:Lerp(escapeDir, 0.2)
+    end
+
+    self.LastKnownPlayerPos = playerPos
+end
+
+function HunterAI:GetBestFlankPosition(playerPos, hunterPos)
+    -- Try to get ahead of the player based on their movement pattern
+    local escapeDir = self.LearnedData.PlayerEscapeDirection
+    local predictedPos = playerPos + escapeDir * 30
+
+    -- Cast rays to check if position is accessible
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    if self.Model then
+        rayParams.FilterDescendantsInstances = {self.Model}
+    end
+
+    -- Find ground
+    local ray = Workspace:Raycast(predictedPos + Vector3.new(0, 10, 0), Vector3.new(0, -20, 0), rayParams)
+    if ray then
+        return ray.Position + Vector3.new(0, 3, 0)
+    end
+
+    return predictedPos
+end
+
+function HunterAI:ChooseStrategy()
+    local player = Players.LocalPlayer
+    local char = player.Character
+    if not char then return "PATROL" end
+
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return "PATROL" end
+
+    local myRoot = self.Model and (self.Model:FindFirstChild("HumanoidRootPart") or self.Model.PrimaryPart)
+    if not myRoot then return "PATROL" end
+
+    local dist = (rootPart.Position - myRoot.Position).Magnitude
+    local playerSpeed = self.LearnedData.PlayerSpeed
+    local mySpeed = self.Config.Speed
+
+    -- Can I outrun them?
+    local canOutrun = mySpeed > playerSpeed
+
+    if dist < 20 then
+        if self.AbilityCooldown <= 0 then
+            return "ABILITY"
+        end
+        return "CHASE"
+    elseif dist < 60 then
+        if canOutrun then
+            return "CHASE"
+        else
+            return "FLANK"
+        end
+    elseif self.LastKnownPlayerPos and dist < 150 then
+        -- Check if player might be hiding
+        if playerSpeed < 2 then
+            return "INVESTIGATE"
+        end
+        return "CHASE"
+    else
+        -- Look at favorite areas
+        local bestArea = self:GetMostVisitedArea()
+        if bestArea then
+            return "SEARCH"
+        end
+        return "PATROL"
+    end
+end
+
+function HunterAI:GetMostVisitedArea()
+    local best = nil
+    local bestVisits = 0
+
+    for _, area in pairs(self.LearnedData.PlayerFavoriteAreas) do
+        if area.Visits > bestVisits then
+            bestVisits = area.Visits
+            best = area
+        end
+    end
+
+    return best
+end
+
+function HunterAI:ScanForItems()
+    -- Hunter looks for items in the world to use
+    local myRoot = self.Model and (self.Model:FindFirstChild("HumanoidRootPart") or self.Model.PrimaryPart)
+    if not myRoot then return end
+
+    -- Scan nearby tools
+    for _, obj in pairs(Workspace:GetDescendants()) do
+        if obj:IsA("Tool") and not obj.Parent:IsA("Model") then
+            local handle = obj:FindFirstChild("Handle")
+            if handle then
+                local dist = (handle.WorldPosition - myRoot.Position).Magnitude
+                if dist < 15 then
+                    self.ItemSeen = obj
+                    return obj
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+function HunterAI:TryPickupItem(item)
+    if not item or self.ItemCooldown > 0 then return end
+
+    local myHumanoid = self.Model and self.Model:FindFirstChildOfClass("Humanoid")
+    local myRoot = self.Model and (self.Model:FindFirstChild("HumanoidRootPart") or self.Model.PrimaryPart)
+    if not myHumanoid or not myRoot then return end
+
+    local handle = item:FindFirstChild("Handle")
+    if handle then
+        local dist = (handle.WorldPosition - myRoot.Position).Magnitude
+        if dist < 5 then
+            -- Move tool to hunter's character (simulate pickup)
+            item.Parent = self.Model
+            if myHumanoid then
+                myHumanoid:EquipTool(item)
+            end
+            self.ItemCooldown = 10
+            self.LearnedData.PlayerItemUsage[item.Name] = (self.LearnedData.PlayerItemUsage[item.Name] or 0) + 1
+            self:UpdateStatus("Picked up " .. item.Name .. "!")
+        end
+    end
+end
+
+function HunterAI:UpdateStatus(text)
+    self.StatusText = text
+    -- Update UI
+    for i, hunter in ipairs(GameState.Hunters) do
+        if hunter.AI == self then
+            local label = GameState.UIElements["HunterStatus_" .. i]
+            if label then
+                label.Text = text
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- HUNTER CREATION
+-- ============================================================
+
+local HunterManager = {}
+
+function HunterManager:CreateHunterModel(hunterConfig)
+    local model = Instance.new("Model")
+    model.Name = "Hunter_" .. hunterConfig.Name
+
+    -- Create parts
+    local parts = {
+        {Name = "HumanoidRootPart", Size = Vector3.new(2, 2, 1), CanCollide = false},
+        {Name = "Torso", Size = Vector3.new(2, 2, 1)},
+        {Name = "Head", Size = Vector3.new(2, 1, 1)},
+        {Name = "Left Arm", Size = Vector3.new(1, 2, 1)},
+        {Name = "Right Arm", Size = Vector3.new(1, 2, 1)},
+        {Name = "Left Leg", Size = Vector3.new(1, 2, 1)},
+        {Name = "Right Leg", Size = Vector3.new(1, 2, 1)},
+    }
+
+    local colorMap = {
+        Head = hunterConfig.BodyColors.Head,
+        Torso = hunterConfig.BodyColors.Torso,
+        ["Left Arm"] = hunterConfig.BodyColors.Arms,
+        ["Right Arm"] = hunterConfig.BodyColors.Arms,
+        ["Left Leg"] = hunterConfig.BodyColors.Legs,
+        ["Right Leg"] = hunterConfig.BodyColors.Legs,
+    }
+
+    local createdParts = {}
+
+    for _, partData in ipairs(parts) do
+        local part = Instance.new("Part")
+        part.Name = partData.Name
+        part.Size = partData.Size
+        part.BrickColor = BrickColor.new(colorMap[partData.Name] or hunterConfig.BodyColors.Torso)
+        part.Color = colorMap[partData.Name] or hunterConfig.BodyColors.Torso
+        part.Material = Enum.Material.SmoothPlastic
+        part.CastShadow = true
+
+        if partData.CanCollide == false then
+            part.CanCollide = false
+        end
+
+        -- Add glow effect to make hunters look scary
+        if partData.Name == "Head" or partData.Name == "Torso" then
+            local selectionBox = Instance.new("SelectionBox")
+            selectionBox.Adornee = part
+            selectionBox.Color3 = hunterConfig.SecondaryColor
+            selectionBox.LineThickness = 0.05
+            selectionBox.SurfaceTransparency = 1
+            selectionBox.Parent = part
+        end
+
+        part.Parent = model
+        createdParts[partData.Name] = part
+    end
+
+    -- Weld everything together
+    local function Weld(a, b, c0, c1)
+        local weld = Instance.new("Motor6D")
+        weld.Part0 = a
+        weld.Part1 = b
+        weld.C0 = c0 or CFrame.new()
+        weld.C1 = c1 or CFrame.new()
+        weld.Parent = a
+        return weld
+    end
+
+    local root = createdParts["HumanoidRootPart"]
+    local torso = createdParts["Torso"]
+    local head = createdParts["Head"]
+    local lArm = createdParts["Left Arm"]
+    local rArm = createdParts["Right Arm"]
+    local lLeg = createdParts["Left Leg"]
+    local rLeg = createdParts["Right Leg"]
+
+    model.PrimaryPart = root
+
+    Weld(root, torso, CFrame.new(), CFrame.new())
+    Weld(torso, head, CFrame.new(0, 1, 0), CFrame.new(0, -0.5, 0))
+    Weld(torso, lArm, CFrame.new(-1.5, 0, 0), CFrame.new(0.5, 0, 0))
+    Weld(torso, rArm, CFrame.new(1.5, 0, 0), CFrame.new(-0.5, 0, 0))
+    Weld(torso, lLeg, CFrame.new(-0.5, -2, 0), CFrame.new(0, 1, 0))
+    Weld(torso, rLeg, CFrame.new(0.5, -2, 0), CFrame.new(0, 1, 0))
+
+    -- Add humanoid
+    local humanoid = Instance.new("Humanoid")
+    humanoid.MaxHealth = hunterConfig.Health
+    humanoid.Health = hunterConfig.Health
+    humanoid.WalkSpeed = hunterConfig.Speed
+    humanoid.JumpPower = 50
+    humanoid.DisplayName = hunterConfig.DisplayName
+    humanoid.NameDisplayDistance = 50
+    humanoid.Parent = model
+
+    -- Humanoid description for display
+    local humanoidDesc = Instance.new("HumanoidDescription")
+    humanoidDesc.Parent = humanoid
+
+    -- Name tag with glow
+    local billboardGui = Instance.new("BillboardGui")
+    billboardGui.Size = UDim2.new(0, 200, 0, 50)
+    billboardGui.StudsOffset = Vector3.new(0, 3.5, 0)
+    billboardGui.AlwaysOnTop = false
+    billboardGui.Parent = createdParts["Head"]
+
+    local nameLabel2 = Instance.new("TextLabel")
+    nameLabel2.Size = UDim2.new(1, 0, 1, 0)
+    nameLabel2.BackgroundTransparency = 1
+    nameLabel2.TextColor3 = hunterConfig.SecondaryColor
+    nameLabel2.TextScaled = true
+    nameLabel2.Font = Enum.Font.GothamBold
+    nameLabel2.Text = "☠ " .. hunterConfig.DisplayName
+    nameLabel2.TextStrokeTransparency = 0
+    nameLabel2.TextStrokeColor3 = hunterConfig.Color
+    nameLabel2.Parent = billboardGui
+
+    -- Add special eye glow effect
+    local eyePart = Instance.new("Part")
+    eyePart.Name = "EyeGlow"
+    eyePart.Size = Vector3.new(1.8, 0.4, 0.1)
+    eyePart.Material = Enum.Material.Neon
+    eyePart.Color = hunterConfig.SecondaryColor
+    eyePart.CanCollide = false
+    eyePart.CastShadow = false
+    eyePart.Parent = model
+
+    local eyeWeld = Instance.new("WeldConstraint")
+    eyeWeld.Part0 = head
+    eyeWeld.Part1 = eyePart
+    eyeWeld.Parent = eyePart
+
+    eyePart.CFrame = head.CFrame * CFrame.new(0, 0.1, -0.55)
+
+    -- Place model in workspace
+    local spawnPos = self:GetHunterSpawnPosition()
+    model:SetPrimaryPartCFrame(CFrame.new(spawnPos))
+    model.Parent = Workspace
+
+    -- Add hat/accessory for personality
+    self:AddHunterAccessory(model, hunterConfig, createdParts["Head"])
+
+    return model, humanoid
+end
+
+function HunterManager:AddHunterAccessory(model, config, headPart)
+    -- Each hunter gets a unique visual accessory
+    local accessories = {
+        SHADOW = function()
+            -- Dark hood
+            local hood = Instance.new("Part")
+            hood.Size = Vector3.new(2.2, 1.2, 2.2)
+            hood.BrickColor = BrickColor.new(config.BodyColors.Head)
+            hood.Material = Enum.Material.Fabric
+            hood.CanCollide = false
+            hood.Parent = model
+
+            local hoodWeld = Instance.new("WeldConstraint")
+            hoodWeld.Part0 = headPart
+            hoodWeld.Part1 = hood
+            hoodWeld.Parent = hood
+            hood.CFrame = headPart.CFrame * CFrame.new(0, 0.3, 0)
+
+            local hoodCorner = Instance.new("SpecialMesh")
+            hoodCorner.MeshType = Enum.MeshType.Sphere
+            hoodCorner.Scale = Vector3.new(1.15, 1.25, 1.15)
+            hoodCorner.Parent = hood
+        end,
+        PHANTOM = function()
+            -- Spectral crown
+            for i = 1, 5 do
+                local spike = Instance.new("Part")
+                spike.Size = Vector3.new(0.2, 0.6, 0.2)
+                spike.Material = Enum.Material.Neon
+                spike.Color = config.SecondaryColor
+                spike.CanCollide = false
+                spike.Parent = model
+
+                local spikeWeld = Instance.new("WeldConstraint")
+                spikeWeld.Part0 = headPart
+                spikeWeld.Part1 = spike
+                spikeWeld.Parent = spike
+
+                local angle = (i / 5) * math.pi * 2
+                spike.CFrame = headPart.CFrame * CFrame.new(
+                    math.cos(angle) * 0.8,
+                    0.8,
+                    math.sin(angle) * 0.8
+                ) * CFrame.Angles(0, angle, math.rad(20))
+            end
+        end,
+        WRAITH = function()
+            -- Horns
+            for side = -1, 1, 2 do
+                local horn = Instance.new("Part")
+                horn.Size = Vector3.new(0.3, 0.8, 0.3)
+                horn.Material = Enum.Material.SmoothPlastic
+                horn.Color = Color3.fromRGB(30, 0, 0)
+                horn.CanCollide = false
+                horn.Parent = model
+
+                local hornMesh = Instance.new("SpecialMesh")
+                hornMesh.MeshType = Enum.MeshType.Cylinder
+                hornMesh.Parent = horn
+
+                local hornWeld = Instance.new("WeldConstraint")
+                hornWeld.Part0 = headPart
+                hornWeld.Part1 = horn
+                hornWeld.Parent = horn
+
+                horn.CFrame = headPart.CFrame * CFrame.new(side * 0.6, 0.7, 0) * CFrame.Angles(0, 0, math.rad(side * 25))
+            end
+        end,
+    }
+
+    if accessories[config.Name] then
+        accessories[config.Name]()
+    end
+end
+
+function HunterManager:GetHunterSpawnPosition()
+    -- Spawn hunters away from the player
+    local char = LocalPlayer.Character
+    local playerPos = char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position or Vector3.new(0, 10, 0)
+
+    local angle = math.random() * math.pi * 2
+    local distance = math.random(100, 200)
+
+    local pos = playerPos + Vector3.new(
+        math.cos(angle) * distance,
+        0,
+        math.sin(angle) * distance
+    )
+
+    -- Find ground
+    local ray = Workspace:Raycast(pos + Vector3.new(0, 50, 0), Vector3.new(0, -100, 0))
+    if ray then
+        return ray.Position + Vector3.new(0, 5, 0)
+    end
+
+    return Vector3.new(pos.X, 10, pos.Z)
+end
+
+function HunterManager:CreateHunterTools(hunter, model)
+    for _, toolName in ipairs(hunter.Config.Tools) do
+        local tool = Instance.new("Tool")
+        tool.Name = toolName
+        tool.RequiresHandle = true
+
+        local handle = Instance.new("Part")
+        handle.Name = "Handle"
+        handle.Size = Vector3.new(0.8, 2, 0.4)
+        handle.CanCollide = false
+
+        local colorMap = {
+            ["Obsidian Blade"] = Color3.fromRGB(30, 0, 50),
+            ["Smoke Bomb"] = Color3.fromRGB(100, 100, 100),
+            ["Shadow Compass"] = Color3.fromRGB(80, 0, 120),
+            ["Spectral Spear"] = Color3.fromRGB(0, 200, 255),
+            ["Phase Grenade"] = Color3.fromRGB(0, 100, 150),
+            ["Echo Tracker"] = Color3.fromRGB(0, 150, 200),
+            ["Infernal Axe"] = Color3.fromRGB(200, 50, 0),
+            ["Rage Totem"] = Color3.fromRGB(150, 0, 0),
+            ["Heat Seeker"] = Color3.fromRGB(255, 100, 0),
+        }
+
+        handle.Color = colorMap[toolName] or hunter.Config.Color
+        handle.Material = Enum.Material.Neon
+        handle.Parent = tool
+
+        -- Add mesh for weapon look
+        local mesh = Instance.new("SpecialMesh")
+        if toolName:find("Blade") or toolName:find("Spear") or toolName:find("Axe") then
+            mesh.MeshType = Enum.MeshType.Wedge
+        else
+            mesh.MeshType = Enum.MeshType.Sphere
+        end
+        mesh.Scale = Vector3.new(0.8, 1, 0.4)
+        mesh.Parent = handle
+
+        -- Glow effect
+        local pointLight = Instance.new("PointLight")
+        pointLight.Color = hunter.Config.SecondaryColor
+        pointLight.Range = 8
+        pointLight.Brightness = 2
+        pointLight.Parent = handle
+
+        tool.Parent = model
+
+        -- Equip first tool
+        if toolName == hunter.Config.Tools[1] then
+            local humanoid = model:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                task.spawn(function()
+                    task.wait(0.5)
+                    humanoid:EquipTool(tool)
+                end)
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- INTRO SEQUENCE
+-- ============================================================
+
+local IntroSystem = {}
+
+function IntroSystem:PlayIntro()
+    GameState.IsIntroPlaying = true
+    GameState.Phase = "INTRO"
+
+    local elements = GameState.UIElements
+
+    -- Start ambient sound
+    local ambientSound = CreateSound(CONFIG.SOUNDS.AMBIENT, 0.3, 1, true)
+    ambientSound:Play()
+
+    -- Show blackout
+    elements.Blackout.BackgroundTransparency = 0
+    elements.Blackout.Visible = true
+
+    -- Brief darkness
+    task.wait(0.5)
+
+    -- Fade in cinematic bars
+    elements.TopBar.Visible = true
+    elements.BottomBar.Visible = true
+
+    local topTween = CreateTween(elements.TopBar, {Position = UDim2.new(0, 0, 0, 0)}, 0.8, Enum.EasingStyle.Back)
+    local botTween = CreateTween(elements.BottomBar, {Position = UDim2.new(0, 0, 0.88, 0)}, 0.8, Enum.EasingStyle.Back)
+    topTween:Play()
+    botTween:Play()
+    task.wait(0.5)
+
+    -- Fade out blackout to reveal world
+    local fadeOut = CreateTween(elements.Blackout, {BackgroundTransparency = 1}, 1.5, Enum.EasingStyle.Sine)
+    fadeOut:Play()
+    task.wait(1)
+
+    -- Setup camera for cinematic
+    CameraController:SaveState()
+    CameraController:SetCinematic()
+
+    -- Show title container
+    elements.TitleContainer.Visible = true
+
+    -- Animate title
+    task.spawn(function()
+        TextAnimator:TypeWrite(elements.TitleLabel, "MANHUNT", 0.08, Color3.fromRGB(255, 50, 50))
+        task.wait(0.3)
+        -- Expand accent line
+        local lineTween = CreateTween(elements.AccentLine, {Size = UDim2.new(0.8, 0, 0, 3)}, 0.6, Enum.EasingStyle.Expo)
+        lineTween:Play()
+        task.wait(0.5)
+        TextAnimator:TypeWrite(elements.SubtitleLabel, "ACROSS ROBLOX", 0.06, Color3.fromRGB(200, 200, 200))
+    end)
+
+    task.wait(3.5)
+
+    -- Camera shake for dramatic effect
+    local dramatic = CreateSound(CONFIG.SOUNDS.DRAMATIC, 0.8, 1)
+    dramatic:Play()
+
+    -- Now introduce each hunter
+    for i, hunterData in ipairs(CONFIG.HUNTERS) do
+        self:IntroduceHunter(i, hunterData)
+        task.wait(0.5)
+    end
+
+    task.wait(1)
+
+    -- ALL HUNTERS REVEALED - Final dramatic moment
+    self:PlayFinalMoment()
+
+    task.wait(2)
+
+    -- Transition to gameplay
+    self:TransitionToGame()
+
+    ambientSound:Stop()
+    ambientSound:Destroy()
+    GameState.IsIntroPlaying = false
+end
+
+function IntroSystem:IntroduceHunter(index, hunterData)
+    local elements = GameState.UIElements
+    local hunter = GameState.Hunters[index]
+
+    -- Camera sweep to hunter
+    if hunter and hunter.Model then
+        task.spawn(function()
+            CameraController:SweepToHunter(hunter.Model, 2)
+        end)
+    else
+        -- Default dramatic camera angle if no model yet
+        local char = LocalPlayer.Character
+        if char then
+            local rootPart = char:FindFirstChild("HumanoidRootPart")
+            if rootPart then
+                local lookPos = rootPart.Position
+                Camera.CFrame = CFrame.new(lookPos + Vector3.new(20, 15, 20), lookPos)
+            end
+        end
+    end
+
+    -- Update card accent color
+    elements.CardAccent.BackgroundColor3 = hunterData.Color
+
+    -- Hunter number indicator
+    elements.HunterNum.Text = "HUNTER " .. index .. " OF 3"
+    elements.HunterNum.TextColor3 = hunterData.Color
+
+    -- Animate hunter card sliding in
+    elements.HunterCard.Position = UDim2.new(1.1, 0, 0.55, 0)
+
+    local slideIn = CreateTween(
+        elements.HunterCard,
+        {Position = UDim2.new(0.48, 0, 0.55, 0)},
+        0.5,
+        Enum.EasingStyle.Back,
+        Enum.EasingDirection.Out
+    )
+    slideIn:Play()
+    task.wait(0.3)
+
+    -- Clear previous text
+    elements.HunterName.Text = ""
+    elements.HunterDesc.Text = ""
+    elements.HunterAbility.Text = ""
+    elements.HunterName.TextColor3 = hunterData.SecondaryColor
+
+    -- Type hunter name with glitch effect
+    task.spawn(function()
+        TextAnimator:GlitchReveal(elements.HunterName, hunterData.DisplayName, 0.8)
+    end)
+    task.wait(1)
+
+    -- Type description
+    task.spawn(function()
+        TextAnimator:TypeWrite(elements.HunterDesc, hunterData.Description, 0.03, Color3.fromRGB(180, 180, 180))
+    end)
+    task.wait(1.2)
+
+    -- Flash ability
+    local abilityText = "⚡ " .. hunterData.AbilityDescription
+    task.spawn(function()
+        TextAnimator:FlashText(
+            elements.HunterAbility,
+            abilityText,
+            3,
+            0.15,
+            Color3.fromRGB(255, 200, 0),
+            Color3.fromRGB(200, 150, 0)
+        )
+        elements.HunterAbility.Text = abilityText
+    end)
+
+    -- Screen flash in hunter color
+    local flash = Instance.new("Frame")
+    flash.Size = UDim2.new(1, 0, 1, 0)
+    flash.BackgroundColor3 = hunterData.Color
+    flash.BackgroundTransparency = 0.7
+    flash.BorderSizePixel = 0
+    flash.ZIndex = 95
+    flash.Parent = GameState.UIElements.ScreenGui
+
+    local flashTween = CreateTween(flash, {BackgroundTransparency = 1}, 0.5)
+    flashTween:Play()
+    task.wait(0.5)
+    flash:Destroy()
+
+    task.wait(1.5)
+
+    -- Slide card out
+    local slideOut = CreateTween(
+        elements.HunterCard,
+        {Position = UDim2.new(-0.6, 0, 0.55, 0)},
+        0.4,
+        Enum.EasingStyle.Quad,
+        Enum.EasingDirection.In
+    )
+    slideOut:Play()
+    task.wait(0.5)
+end
+
+function IntroSystem:PlayFinalMoment()
+    local elements = GameState.UIElements
+
+    -- Clear hunter info
+    elements.HunterName.Text = ""
+    elements.HunterDesc.Text = ""
+    elements.HunterAbility.Text = ""
+    elements.HunterNum.Text = ""
+
+    -- HUNT START message
+    local huntSound = CreateSound(CONFIG.SOUNDS.HUNT_START, 1, 1)
+    huntSound:Play()
+
+    -- Dramatic camera shake
+    task.spawn(function()
+        CameraController:Shake(2, 0.8)
+    end)
+
+    -- Big warning flash
+    local warningFrame = Instance.new("Frame")
+    warningFrame.Size = UDim2.new(1, 0, 1, 0)
+    warningFrame.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+    warningFrame.BackgroundTransparency = 0
+    warningFrame.ZIndex = 99
+    warningFrame.Parent = elements.ScreenGui
+
+    local warningText = Instance.new("TextLabel")
+    warningText.Size = UDim2.new(1, 0, 0.2, 0)
+    warningText.Position = UDim2.new(0, 0, 0.4, 0)
+    warningText.BackgroundTransparency = 1
+    warningText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    warningText.TextScaled = true
+    warningText.Font = Enum.Font.GothamBold
+    warningText.Text = "⚠ THE HUNT BEGINS ⚠"
+    warningText.ZIndex = 100
+    warningText.Parent = warningFrame
+
+    task.wait(0.1)
+
+    local fadeWarning = CreateTween(warningFrame, {BackgroundTransparency = 1}, 1.5)
+    fadeWarning:Play()
+    warningText.TextColor3 = Color3.fromRGB(255, 100, 100)
+    task.wait(1.5)
+    warningFrame:Destroy()
+end
+
+function IntroSystem:TransitionToGame()
+    local elements = GameState.UIElements
+
+    -- Restore camera
+    CameraController:Restore()
+
+    -- Fade out cinematic bars
+    local topTween = CreateTween(elements.TopBar, {Position = UDim2.new(0, 0, -0.12, 0)}, 0.8, Enum.EasingStyle.Quad)
+    local botTween = CreateTween(elements.BottomBar, {Position = UDim2.new(0, 0, 1.12, 0)}, 0.8, Enum.EasingStyle.Quad)
+    topTween:Play()
+    botTween:Play()
+
+    -- Hide title
+    local titleFade = CreateTween(elements.TitleContainer, {}, 0.5)
+    titleFade:Play()
+    task.wait(0.3)
+    elements.TitleContainer.Visible = false
+
+    task.wait(0.5)
+
+    -- Show HUD
+    elements.HUDContainer.Visible = true
+    elements.CountdownFrame.Visible = true
+    elements.TimerFrame.Visible = true
+
+    -- Flash hunt start alert
+    elements.HuntingAlert.Visible = true
+    elements.HuntingAlert.BackgroundTransparency = 0.3
+
+    task.spawn(function()
+        for i = 1, 4 do
+            local t = CreateTween(elements.HuntingAlert, {BackgroundTransparency = 0.1}, 0.3)
+            t:Play()
+            task.wait(0.35)
+            local t2 = CreateTween(elements.HuntingAlert, {BackgroundTransparency = 0.6}, 0.3)
+            t2:Play()
+            task.wait(0.35)
+        end
+        local hide = CreateTween(elements.HuntingAlert, {BackgroundTransparency = 1}, 0.5)
+        hide:Play()
+        task.wait(0.5)
+        elements.HuntingAlert.Visible = false
+    end)
+
+    GameState.Phase = "COUNTDOWN"
+    GameState.HuntStartTime = tick()
+end
+
+-- ============================================================
+-- DANGER SYSTEM
+-- ============================================================
+
+local DangerSystem = {}
+
+function DangerSystem:GetNearestHunterDistance()
+    local char = LocalPlayer.Character
+    if not char then return math.huge end
+
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return math.huge end
+
+    local nearest = math.huge
+    for _, hunter in ipairs(GameState.Hunters) do
+        if hunter.Model then
+            local hRoot = hunter.Model:FindFirstChild("HumanoidRootPart") or hunter.Model.PrimaryPart
+            if hRoot then
+                local dist = (rootPart.Position - hRoot.Position).Magnitude
+                if dist < nearest then
+                    nearest = dist
+                end
+            end
+        end
+    end
+
+    return nearest
+end
+
+function DangerSystem:UpdateDangerLevel(distance)
+    local elements = GameState.UIElements
+
+    -- Vignette intensity based on distance
+    local maxDist = 100
+    local dangerLevel = math.clamp(1 - (distance / maxDist), 0, 1)
+
+    -- Update vignette
+    local vigTransparency = 1 - (dangerLevel * 0.7)
+    elements.Vignette.ImageTransparency = vigTransparency
+
+    -- Heartbeat effect when very close
+    if distance < 30 and GameState.Phase == "HUNTING" then
+        self:TriggerHeartbeat(dangerLevel)
+    end
+
+    -- Status panel color based on danger
+    if elements.StatusPanel then
+        local dangerColor = LerpColor(
+            Color3.fromRGB(50, 50, 50),
+            Color3.fromRGB(200, 0, 0),
+            dangerLevel
+        )
+        -- Animate border
+        local border = elements.StatusPanel:FindFirstChildOfClass("UIStroke")
+        if border then
+            border.Color = dangerColor
+        end
+    end
+end
+
+local lastHeartbeat = 0
+function DangerSystem:TriggerHeartbeat(intensity)
+    if tick() - lastHeartbeat < (1.5 - intensity) then return end
+    lastHeartbeat = tick()
+
+    local frame = GameState.UIElements.HeartbeatFrame
+    if not frame then return end
+
+    frame.Visible = true
+    frame.BackgroundTransparency = 0.8
+
+    task.spawn(function()
+        -- Quick pulse
+        local p1 = CreateTween(frame, {BackgroundTransparency = 0.6}, 0.1)
+        p1:Play()
+        task.wait(0.1)
+        local p2 = CreateTween(frame, {BackgroundTransparency = 0.85}, 0.15)
+        p2:Play()
+        task.wait(0.15)
+        local p3 = CreateTween(frame, {BackgroundTransparency = 0.7}, 0.1)
+        p3:Play()
+        task.wait(0.1)
+        local p4 = CreateTween(frame, {BackgroundTransparency = 1}, 0.4)
+        p4:Play()
+        task.wait(0.4)
+        frame.Visible = false
+    end)
+end
+
+-- ============================================================
+-- COMPASS SYSTEM
+-- ============================================================
+
+local CompassSystem = {}
+
+function CompassSystem:Update()
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+
+    -- Find nearest hunter
+    local nearestHunter = nil
+    local nearestDist = math.huge
+
+    for _, hunter in ipairs(GameState.Hunters) do
+        if hunter.Model then
+            local hRoot = hunter.Model:FindFirstChild("HumanoidRootPart") or hunter.Model.PrimaryPart
+            if hRoot then
+                local dist = (rootPart.Position - hRoot.Position).Magnitude
+                if dist < nearestDist then
+                    nearestDist = dist
+                end
+                nearestHunter = hRoot
+            end
+        end
+    end
+
+    if not nearestHunter then return end
+
+    -- Calculate compass angle
+    local toHunter = (nearestHunter.Position - rootPart.Position)
+    local hunterAngle = math.atan2(toHunter.X, toHunter.Z)
+    local playerAngle = rootPart.CFrame.LookVector
+    local camAngle = math.atan2(playerAngle.X, playerAngle.Z)
+    local relativeAngle = hunterAngle - camAngle
+
+    -- Smooth rotation of compass needle
+    GameState.CompassAngle = relativeAngle
+
+    local needle = GameState.UIElements.CompassNeedle
+    if needle then
+        local compassFrame = GameState.UIElements.CompassFrame
+        local centerX = compassFrame.AbsoluteSize.X / 2
+        local centerY = compassFrame.AbsoluteSize.Y / 2
+        local radius = compassFrame.AbsoluteSize.X * 0.35
+
+        local needleX = 0.5 + (math.sin(relativeAngle) * 0.35) - (needle.Size.X.Scale / 2)
+        local needleY = 0.5 - (math.cos(relativeAngle) * 0.35) - (needle.Size.Y.Scale / 2)
+
+        -- Rotate needle (approximated with position)
+        needle.Position = UDim2.new(needleX, 0, needleY, 0)
+        needle.Rotation = math.deg(relativeAngle)
+    end
+
+    -- Update distance label
+    local distLabel = GameState.UIElements.DistLabel
+    if distLabel then
+        local distText = ""
+        if nearestDist < 50 then
+            distText = "⚠ VERY CLOSE ⚠"
+            distLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+        elseif nearestDist < 100 then
+            distText = math.floor(nearestDist) .. " studs"
+            distLabel.TextColor3 = Color3.fromRGB(255, 150, 0)
+        else
+            distText = math.floor(nearestDist) .. " studs"
+            distLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+        end
+        distLabel.Text = distText
+    end
+
+    -- Ping sound when hunter gets close
+    if nearestDist < 50 and GameState.Phase == "HUNTING" then
+        -- Ping faster as hunter gets closer
+        local pingInterval = math.clamp(nearestDist / 50, 0.1, 1)
+        -- (Handled by timer in main loop)
+    end
+end
+
+-- ============================================================
+-- HUNTER BEHAVIOR UPDATE
+-- ============================================================
+
+local HunterBehavior = {}
+
+function HunterBehavior:UpdateHunter(hunter, dt)
+    if not hunter.Model then return end
+
+    local ai = hunter.AI
+    local humanoid = hunter.Model:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        ai:UpdateStatus("❌ Defeated")
+        return
+    end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local playerRoot = char:FindFirstChild("HumanoidRootPart")
+    if not playerRoot then return end
+
+    local myRoot = hunter.Model:FindFirstChild("HumanoidRootPart") or hunter.Model.PrimaryPart
+    if not myRoot then return end
+
+    -- Update ability cooldown
+    if ai.AbilityCooldown > 0 then
+        ai.AbilityCooldown = ai.AbilityCooldown - dt
+    end
+
+    -- Update item cooldown
+    if ai.ItemCooldown > 0 then
+        ai.ItemCooldown = ai.ItemCooldown - dt
+    end
+
+    -- Don't act during countdown
+    if GameState.Phase == "COUNTDOWN" then
+        ai:UpdateStatus("Waiting for hunt...")
+        return
+    end
+
+    local playerVel = char:FindFirstChild("HumanoidRootPart") and
+        char.HumanoidRootPart.AssemblyLinearVelocity or Vector3.new()
+
+    -- Learning update
+    ai:UpdateLearning(playerRoot.Position, playerVel)
+
+    -- Scan for items in world
+    task.spawn(function()
+        local item = ai:ScanForItems()
+        if item and ai.ItemCooldown <= 0 then
+            ai:TryPickupItem(item)
+        end
+    end)
+
+    -- Choose and execute strategy
+    local strategy = ai:ChooseStrategy()
+
+    self:ExecuteStrategy(hunter, ai, strategy, humanoid, myRoot, playerRoot, dt)
+end
+
+function HunterBehavior:ExecuteStrategy(hunter, ai, strategy, humanoid, myRoot, playerRoot, dt)
+    local dist = (playerRoot.Position - myRoot.Position).Magnitude
+
+    if strategy == "CHASE" then
+        -- Direct pathfinding to player
+        self:PathfindTo(hunter, playerRoot.Position, humanoid)
+        ai:UpdateStatus("🔴 Chasing!")
+        humanoid.WalkSpeed = hunter.Config.Speed
+
+    elseif strategy == "FLANK" then
+        -- Try to get ahead of player
+        local flankPos = ai:GetBestFlankPosition(playerRoot.Position, myRoot.Position)
+        self:PathfindTo(hunter, flankPos, humanoid)
+        ai:UpdateStatus("⚡ Flanking...")
+        humanoid.WalkSpeed = hunter.Config.Speed * 1.1
+
+    elseif strategy == "ABILITY" then
+        -- Use special ability
+        self:UseAbility(hunter, ai, humanoid, myRoot, playerRoot)
+
+    elseif strategy == "SEARCH" then
+        -- Search likely hiding spots
+        local bestArea = ai:GetMostVisitedArea()
+        if bestArea then
+            self:PathfindTo(hunter, bestArea.Position + Vector3.new(0, 3, 0), humanoid)
+            ai:UpdateStatus("🔍 Searching...")
+        end
+
+    elseif strategy == "INVESTIGATE" then
+        -- Player stopped - they might be hiding
+        if ai.LastKnownPlayerPos then
+            self:PathfindTo(hunter, ai.LastKnownPlayerPos, humanoid)
+            ai:UpdateStatus("👁 Investigating...")
+        end
+
+    elseif strategy == "PATROL" then
+        -- Random patrol
+        self:Patrol(hunter, ai, humanoid, myRoot)
+        ai:UpdateStatus("👣 Patrolling...")
+    end
+
+    -- Attack if in range
+    if dist < 5 and GameState.Phase == "HUNTING" then
+        self:AttemptAttack(hunter, ai, humanoid, myRoot, playerRoot)
+    end
+end
+
+function HunterBehavior:PathfindTo(hunter, targetPos, humanoid)
+    if not humanoid then return end
+
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentJumpHeight = 8,
+        AgentMaxSlope = 45,
+        Costs = {
+            Water = 20,
+        }
+    })
+
+    local myRoot = hunter.Model:FindFirstChild("HumanoidRootPart") or hunter.Model.PrimaryPart
+    if not myRoot then return end
+
+    task.spawn(function()
+        local success, err = pcall(function()
+            path:ComputeAsync(myRoot.Position, targetPos)
+        end)
+
+        if success and path.Status == Enum.PathStatus.Success then
+            local waypoints = path:GetWaypoints()
+
+            for i, waypoint in ipairs(waypoints) do
+                if not hunter.Model or not hunter.Model.Parent then break end
+                if not humanoid or humanoid.Health <= 0 then break end
+
+                if waypoint.Action == Enum.PathWaypointAction.Jump then
+                    humanoid.Jump = true
+                end
+
+                humanoid:MoveTo(waypoint.Position)
+
+                local moved = humanoid.MoveToFinished:Wait(2)
+                if not moved then break end
+            end
+        else
+            -- Fallback: move directly
+            if humanoid then
+                humanoid:MoveTo(targetPos)
+            end
+        end
+    end)
+end
+
+function HunterBehavior:Patrol(hunter, ai, humanoid, myRoot)
+    if not humanoid then return end
+
+    local char = LocalPlayer.Character
+    local playerPos = char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position
+
+    -- Bias patrol toward player's general area
+    local basePos = playerPos or myRoot.Position
+    local patrolPos = basePos + Vector3.new(
+        (math.random() - 0.5) * 80,
+        0,
+        (math.random() - 0.5) * 80
+    )
+
+    -- Find ground
+    local ray = Workspace:Raycast(patrolPos + Vector3.new(0, 20, 0), Vector3.new(0, -40, 0))
+    if ray then
+        patrolPos = ray.Position + Vector3.new(0, 3, 0)
+    end
+
+    self:PathfindTo(hunter, patrolPos, humanoid)
+end
+
+function HunterBehavior:UseAbility(hunter, ai, humanoid, myRoot, playerRoot)
+    if ai.AbilityCooldown > 0 then return end
+
+    local abilityName = hunter.Config.Ability
+
+    if abilityName == "SHADOW_STEP" then
+        -- Teleport behind player
+        ai:UpdateStatus("💨 SHADOW STEP!")
+        ai.AbilityCooldown = hunter.Config.AbilityCooldown
+
+        -- Flash effect
+        task.spawn(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+
+            local playerRoot2 = char:FindFirstChild("HumanoidRootPart")
+            if not playerRoot2 then return end
+
+            -- Teleport to behind player
+            local behindPos = playerRoot2.CFrame * CFrame.new(0, 0, 8)
+            hunter.Model:SetPrimaryPartCFrame(
+                CFrame.new(behindPos.Position + Vector3.new(0, 3, 0))
+            )
+
+            -- Visual effect
+            local flash = Instance.new("Part")
+            flash.Size = Vector3.new(4, 4, 4)
+            flash.Material = Enum.Material.Neon
+            flash.Color = hunter.Config.SecondaryColor
+            flash.CFrame = hunter.Model:GetPrimaryPartCFrame()
+            flash.CanCollide = false
+            flash.Anchored = true
+            flash.Parent = Workspace
+
+            local shrink = CreateTween(flash, {Size = Vector3.new(0.1, 0.1, 0.1), Transparency = 1}, 0.5)
+            shrink:Play()
+            task.wait(0.5)
+            flash:Destroy()
+        end)
+
+    elseif abilityName == "PHASE_WALK" then
+        -- Phase through walls
+        ai:UpdateStatus("👻 PHASE WALK!")
+        ai.AbilityCooldown = hunter.Config.AbilityCooldown
+        ai.IsPhasing = true
+
+        task.spawn(function()
+            -- Make parts non-collidable during phase
+            for _, part in pairs(hunter.Model:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                    part.Transparency = 0.6
+                end
+            end
+
+            humanoid.WalkSpeed = hunter.Config.Speed * 1.5
+
+            task.wait(3)
+
+            -- Restore
+            for _, part in pairs(hunter.Model:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                    part.CanCollide = true
+                    part.Transparency = 0
+                end
+            end
+            humanoid.WalkSpeed = hunter.Config.Speed
+            ai.IsPhasing = false
+            ai:UpdateStatus("Phase ended")
+        end)
+
+    elseif abilityName == "BLOOD_RAGE" then
+        -- Speed and power boost
+        ai:UpdateStatus("💢 BLOOD RAGE!")
+        ai.AbilityCooldown = hunter.Config.AbilityCooldown
+        ai.IsRaging = true
+
+        task.spawn(function()
+            local originalSpeed = hunter.Config.Speed
+            humanoid.WalkSpeed = hunter.Config.Speed * 2
+
+            -- Rage visual
+            for _, part in pairs(hunter.Model:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local origColor = part.Color
+                    local rageTween = CreateTween(part, {Color = Color3.fromRGB(255, 100, 0)}, 0.3)
+                    rageTween:Play()
+                end
+            end
+
+            task.wait(5)
+
+            humanoid.WalkSpeed = originalSpeed
+            ai.IsRaging = false
+
+            for _, part in pairs(hunter.Model:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local restoreTween = CreateTween(part, {Color = hunter.Config.BodyColors.Torso or Color3.fromRGB(50, 0, 0)}, 0.3)
+                    restoreTween:Play()
+                end
+            end
+            ai:UpdateStatus("Rage ended")
+        end)
+    end
+end
+
+function HunterBehavior:AttemptAttack(hunter, ai, humanoid, myRoot, playerRoot)
+    if ai.LearnedData.LastCaughtAttempt and tick() - ai.LearnedData.LastCaughtAttempt < 2 then return end
+    ai.LearnedData.LastCaughtAttempt = tick()
+
+    -- Deal damage to player's character
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local playerHumanoid = char:FindFirstChildOfClass("Humanoid")
+    if playerHumanoid and playerHumanoid.Health > 0 then
+        local damage = ai.IsRaging and 30 or 15
+        playerHumanoid:TakeDamage(damage)
+        ai:UpdateStatus("⚔ ATTACKING!")
+
+        -- Hit visual
+        task.spawn(function()
+            local hitEffect = Instance.new("Frame")
+            hitEffect.Size = UDim2.new(1, 0, 1, 0)
+            hitEffect.BackgroundColor3 = hunter.Config.SecondaryColor
+            hitEffect.BackgroundTransparency = 0.5
+            hitEffect.ZIndex = 90
+            hitEffect.Parent = GameState.UIElements.ScreenGui
+
+            local hitFade = CreateTween(hitEffect, {BackgroundTransparency = 1}, 0.4)
+            hitFade:Play()
+            task.wait(0.4)
+            hitEffect:Destroy()
+        end)
+
+        -- Camera shake on hit
+        task.spawn(function()
+            CameraController:Shake(1, 0.3)
+        end)
+    end
+end
+
+-- ============================================================
+-- MAIN GAME LOOP
+-- ============================================================
+
+local MainLoop = {}
+
+function MainLoop:UpdateHUD()
+    if GameState.Phase == "COUNTDOWN" then
+        local elapsed = tick() - GameState.HuntStartTime
+        local remaining = CONFIG.HUNT_START_DELAY - elapsed
+
+        if remaining <= 0 then
+            -- Start hunting!
+            GameState.Phase = "HUNTING"
+            GameState.UIElements.CountdownFrame.Visible = false
+
+            -- Flash the hunting alert
+            local alert = GameState.UIElements.HuntingAlert
+            alert.Visible = true
+            alert.BackgroundTransparency = 0.3
+
+            task.spawn(function()
+                for i = 1, 6 do
+                    local t = CreateTween(alert, {BackgroundTransparency = 0.1}, 0.2)
+                    t:Play()
+                    task.wait(0.25)
+                    local t2 = CreateTween(alert, {BackgroundTransparency = 0.6}, 0.2)
+                    t2:Play()
+                    task.wait(0.25)
+                end
+                task.wait(0.5)
+                local hide = CreateTween(alert, {BackgroundTransparency = 1}, 0.5)
+                hide:Play()
+                task.wait(0.5)
+                alert.Visible = false
+            end)
+
+            -- Release hunters
+            for _, hunter in ipairs(GameState.Hunters) do
+                local humanoid = hunter.Model and hunter.Model:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    humanoid.WalkSpeed = hunter.Config.Speed
+                end
+            end
+        else
+            -- Update countdown
+            local label = GameState.UIElements.CountdownLabel
+            if label then
+                label.Text = "HEAD START: " .. math.ceil(remaining) .. "s"
+
+                -- Color shifts as time runs out
+                if remaining < 10 then
+                    label.TextColor3 = Color3.fromRGB(255, 50, 50)
+                elseif remaining < 20 then
+                    label.TextColor3 = Color3.fromRGB(255, 150, 50)
+                else
+                    label.TextColor3 = Color3.fromRGB(255, 200, 0)
+                end
+            end
+        end
+    end
+
+    if GameState.Phase == "HUNTING" then
+        -- Update survival timer
+        local elapsed = tick() - GameState.HuntStartTime - CONFIG.HUNT_START_DELAY
+        if elapsed > 0 then
+            local minutes = math.floor(elapsed / 60)
+            local seconds = math.floor(elapsed % 60)
+            local timerLabel = GameState.UIElements.TimerLabel
+            if timerLabel then
+                timerLabel.Text = string.format("%02d:%02d", minutes, seconds)
+            end
+
+            GameState.PlayerData.TimeAlive = elapsed
+        end
+    end
+end
+
+function MainLoop:UpdateCompassAndDanger()
+    if GameState.Phase ~= "HUNTING" and GameState.Phase ~= "COUNTDOWN" then return end
+
+    CompassSystem:Update()
+
+    local nearestDist = DangerSystem:GetNearestHunterDistance()
+    DangerSystem:UpdateDangerLevel(nearestDist)
+end
+
+function MainLoop:TrackPlayerData()
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    local rootPart = char:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return end
+
+    local pos = rootPart.Position
+    local data = GameState.PlayerData
+
+    -- Track position history
+    table.insert(data.LastPositions, pos)
+    if #data.LastPositions > 50 then
+        table.remove(data.LastPositions, 1)
+    end
+
+    data.Position = pos
+end
+
+function MainLoop:UpdateHunterAI(dt)
+    if GameState.Phase ~= "HUNTING" and GameState.Phase ~= "COUNTDOWN" then return end
+
+    for _, hunter in ipairs(GameState.Hunters) do
+        task.spawn(function()
+            HunterBehavior:UpdateHunter(hunter, dt)
+        end)
+    end
+end
+
+-- ============================================================
+-- INITIALIZATION
+-- ============================================================
+
+local function Initialize()
+    print("[MANHUNT] Initializing...")
+
+    -- Wait for character
+    local char = WaitForCharacter()
+    task.wait(1)
+
+    -- Initialize UI
+    UIManager:Init()
+
+    -- Create hunters
+    print("[MANHUNT] Creating hunters...")
+    for i, hunterConfig in ipairs(CONFIG.HUNTERS) do
+        local model, humanoid = HunterManager:CreateHunterModel(hunterConfig)
+        HunterManager:CreateHunterTools({Config = hunterConfig, Model = model}, model)
+
+        -- Initially freeze hunters
+        if humanoid then
+            humanoid.WalkSpeed = 0
+        end
+
+        local ai = HunterAI:New(hunterConfig, model)
+
+        table.insert(GameState.Hunters, {
+            Config = hunterConfig,
+            Model = model,
+            Humanoid = humanoid,
+            AI = ai,
+        })
+
+        print("[MANHUNT] Created hunter: " .. hunterConfig.Name)
+    end
+
+    -- Start intro
+    task.wait(0.5)
+    print("[MANHUNT] Playing intro...")
+    task.spawn(function()
+        IntroSystem:PlayIntro()
+    end)
+
+    -- Main game loop
+    local aiTimer = 0
+    local compassTimer = 0
+
+    RunService.Heartbeat:Connect(function(dt)
+        aiTimer = aiTimer + dt
+        compassTimer = compassTimer + dt
+
+        -- Update HUD every frame
+        MainLoop:UpdateHUD()
+
+        -- Update compass frequently
+        if compassTimer >= CONFIG.COMPASS_UPDATE_RATE then
+            compassTimer = 0
+            MainLoop:UpdateCompassAndDanger()
+        end
+
+        -- Update AI at set interval
+        if aiTimer >= CONFIG.AI_UPDATE_RATE then
+            aiTimer = 0
+            MainLoop:TrackPlayerData()
+            MainLoop:UpdateHunterAI(CONFIG.AI_UPDATE_RATE)
+        end
+    end)
+
+    -- Player death detection
+    LocalPlayer.CharacterAdded:Connect(function(newChar)
+        task.wait(1)
+        char = newChar
+        if GameState.Phase == "HUNTING" then
+            -- Show death screen
+            local deathScreen = Instance.new("Frame")
+            deathScreen.Size = UDim2.new(1, 0, 1, 0)
+            deathScreen.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
+            deathScreen.BackgroundTransparency = 0
+            deathScreen.ZIndex = 200
+            deathScreen.Parent = GameState.UIElements.ScreenGui
+
+            local deathLabel = Instance.new("TextLabel")
+            deathLabel.Size = UDim2.new(1, 0, 0.2, 0)
+            deathLabel.Position = UDim2.new(0, 0, 0.35, 0)
+            deathLabel.BackgroundTransparency = 1
+            deathLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+            deathLabel.TextScaled = true
+            deathLabel.Font = Enum.Font.GothamBold
+            deathLabel.Text = "☠ CAUGHT ☠"
+            deathLabel.ZIndex = 201
+            deathLabel.Parent = deathScreen
+
+            local timeLabel = Instance.new("TextLabel")
+            timeLabel.Size = UDim2.new(1, 0, 0.1, 0)
+            timeLabel.Position = UDim2.new(0, 0, 0.56, 0)
+            timeLabel.BackgroundTransparency = 1
+            timeLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+            timeLabel.TextScaled = true
+            timeLabel.Font = Enum.Font.Gotham
+
+            local survived = GameState.PlayerData.TimeAlive
+            local min = math.floor(survived / 60)
+            local sec = math.floor(survived % 60)
+            timeLabel.Text = string.format("You survived for %02d:%02d", min, sec)
+            timeLabel.ZIndex = 201
+            timeLabel.Parent = deathScreen
+
+            task.wait(4)
+
+            local fade = CreateTween(deathScreen, {BackgroundTransparency = 1}, 1)
+            fade:Play()
+            task.wait(1)
+            deathScreen:Destroy()
+
+            GameState.Phase = "HUNTING"
+        end
+    end)
+
+    print("[MANHUNT] Initialized successfully!")
+end
+
+-- ============================================================
+-- START
+-- ============================================================
+
+task.spawn(Initialize)
