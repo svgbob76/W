@@ -1,0 +1,1063 @@
+--[[
+    ================================================================
+    REANIM8 · Character Reanimation Suite · v2.4.1
+    FE-safe LocalScript · R6 + R15 · 10 movements · GUI · FX
+
+    Install : StarterPlayer > StarterPlayerScripts   (or an executor)
+    Keys    : [G] toggle GUI · [K] cook mode · [R] stop movement
+              [1] - [0] fire movement slots · [L-Shift] run
+    ================================================================
+]]
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+
+----------------------------------------------------------------
+-- CONFIG · tune it before the rig tunes it for you
+----------------------------------------------------------------
+local CONFIG = {
+    Rig           = "AUTO",   -- "AUTO" | "R6" | "R15"
+    WalkSpeed     = 16,
+    JumpPower     = 50,       -- R6 uses UseJumpPower = true
+    JumpHeight    = 7,        -- R15 uses Humanoid.JumpHeight
+    RunMultiplier = 1.8,      -- hold LeftShift to run
+    RunKey        = Enum.KeyCode.LeftShift,
+    GuiKey        = Enum.KeyCode.G,
+    CookKey       = Enum.KeyCode.K,
+    StopKey       = Enum.KeyCode.R,
+}
+
+----------------------------------------------------------------
+-- THE 10 MOVEMENTS
+-- Slots 1-4 are PROCEDURAL: pure CFrame math on your Motor6Ds.
+--   No asset ids, no ownership checks, works on every rig.
+-- Slots 5-10 are ASSET emotes: swap Id for any animation you own.
+----------------------------------------------------------------
+local MOVES = {
+    { Slot = 1,  Name = "NARUTO RUN",  Kind = "PROC",  Id = nil },
+    { Slot = 2,  Name = "MOONWALK",    Kind = "PROC",  Id = nil },
+    { Slot = 3,  Name = "SPIN CYCLE",  Kind = "PROC",  Id = nil },
+    { Slot = 4,  Name = "GHOST HOVER", Kind = "PROC",  Id = nil },
+    { Slot = 5,  Name = "DANCE",       Kind = "EMOTE", Id = "rbxassetid://182435998" },
+    { Slot = 6,  Name = "DANCE II",    Kind = "EMOTE", Id = "rbxassetid://182491277" },
+    { Slot = 7,  Name = "WAVE",        Kind = "EMOTE", Id = "rbxassetid://128777973" },
+    { Slot = 8,  Name = "POINT",       Kind = "EMOTE", Id = "rbxassetid://128853357" },
+    { Slot = 9,  Name = "CHEER",       Kind = "EMOTE", Id = "rbxassetid://129423030" },
+    { Slot = 10, Name = "LAUGH",       Kind = "EMOTE", Id = "rbxassetid://129423131" },
+}
+
+----------------------------------------------------------------
+-- LOCOMOTION RE-SKIN
+-- The stock Animate script reads these objects every frame, so
+-- overwriting them re-animates idle, walk, run, jump, fall,
+-- climb, swim and sit. 100% FE-safe. Paste your own ids to
+-- reskin how the whole body moves.
+----------------------------------------------------------------
+local LOCO = {
+    idle1 = "rbxassetid://507766666",
+    idle2 = "rbxassetid://507766951",
+    walk  = "rbxassetid://507770818",
+    run   = "rbxassetid://507770677",
+    jump  = "rbxassetid://507765000",
+    fall  = "rbxassetid://507767968",
+    climb = "rbxassetid://507765644",
+    swim  = "rbxassetid://507770239",
+    sit   = "rbxassetid://507770453",
+}
+
+local FX = {
+    Trails     = true,
+    JumpRing   = true,
+    LandDust   = true,
+    Afterimage = false,
+    Cook       = false,
+}
+
+----------------------------------------------------------------
+-- STATE
+----------------------------------------------------------------
+local State = {
+    character   = nil, humanoid = nil, root = nil, animator = nil,
+    rig         = "R15",
+    playing     = nil, track = nil, procToken = nil,
+    joints      = {}, baseC0 = {}, moveButtons = {}, statusLabel = nil,
+    trail       = nil, ghostClock = 0, running = false,
+    cookLight   = nil, cookFire = nil,
+}
+
+----------------------------------------------------------------
+-- UTILITIES
+----------------------------------------------------------------
+local function tween(inst, t, props, style, dir, delay)
+    local info = TweenInfo.new(
+        t,
+        style or Enum.EasingStyle.Quart,
+        dir or Enum.EasingDirection.Out,
+        0, false, delay or 0
+    )
+    local tw = TweenService:Create(inst, info, props)
+    tw:Play()
+    return tw
+end
+
+local function setStatus(text)
+    if State.statusLabel then
+        State.statusLabel.Text = text
+    end
+end
+
+local function findMotor(character, motorName)
+    for _, d in ipairs(character:GetDescendants()) do
+        if d:IsA("Motor6D") and d.Name == motorName then
+            return d
+        end
+    end
+    return nil
+end
+
+local function makePart(props)
+    local p = Instance.new("Part")
+    p.Anchored = true
+    p.CanCollide = false
+    p.Material = Enum.Material.Neon
+    for k, v in pairs(props) do
+        p[k] = v
+    end
+    p.Parent = workspace
+    return p
+end
+
+----------------------------------------------------------------
+-- JOINT CACHE · names differ between R6 and R15
+----------------------------------------------------------------
+local JOINT_NAMES = {
+    R6 = {
+        Root = "RootJoint", ArmL = "Left Shoulder", ArmR = "Right Shoulder",
+        HipL = "Left Hip",  HipR = "Right Hip",     Neck = "Neck",
+    },
+    R15 = {
+        Root = "Root", ArmL = "LeftShoulder", ArmR = "RightShoulder",
+        HipL = "LeftHip", HipR = "RightHip",  Neck = "Neck", Waist = "Waist",
+    },
+}
+
+local function cacheJoints(character)
+    State.joints, State.baseC0 = {}, {}
+    for key, motorName in pairs(JOINT_NAMES[State.rig]) do
+        local motor = findMotor(character, motorName)
+        if motor then
+            State.joints[key] = motor
+            State.baseC0[motor] = motor.C0
+        end
+    end
+end
+
+local function restoreJoints()
+    for motor, c0 in pairs(State.baseC0) do
+        if motor and motor.Parent then
+            motor.C0 = c0
+        end
+    end
+end
+
+----------------------------------------------------------------
+-- MOVE PLAYBACK
+----------------------------------------------------------------
+local refreshMoveButtons  -- forward declaration (GUI built later)
+
+local function stopEverything()
+    State.procToken = nil
+    if State.track then
+        pcall(function() State.track:Stop(0.15) end)
+        State.track = nil
+    end
+    restoreJoints()
+    State.playing = nil
+    if refreshMoveButtons then refreshMoveButtons() end
+    setStatus("IDLE · " .. State.rig .. " RIG")
+end
+
+----------------------------------------------------------------
+-- PROCEDURAL ENGINE · writes Motor6D.C0 every render frame
+----------------------------------------------------------------
+local function startProc(kind)
+    local token = {}
+    State.procToken = token
+    local t0 = os.clock()
+    local stepName = "Reanim8Proc"
+    pcall(function() RunService:UnbindFromRenderStep(stepName) end)
+
+    RunService:BindToRenderStep(stepName, Enum.RenderPriority.Character.Value, function()
+        if State.procToken ~= token then
+            pcall(function() RunService:UnbindFromRenderStep(stepName) end)
+            return
+        end
+        local t = os.clock() - t0
+        local J, B = State.joints, State.baseC0
+
+        if kind == "SPIN CYCLE" then
+            if J.Root then
+                J.Root.C0 = B[J.Root] * CFrame.Angles(0, t * 10, 0)
+            end
+
+        elseif kind == "GHOST HOVER" then
+            if J.Root then
+                J.Root.C0 = B[J.Root]
+                    * CFrame.new(0, 1.2 + math.sin(t * 2.1) * 0.8, 0)
+                    * CFrame.Angles(0, math.sin(t * 0.8) * 0.15, 0)
+            end
+
+        elseif kind == "NARUTO RUN" then
+            local lean = math.rad(28) + math.sin(t * 16) * 0.02
+            if J.Root then
+                J.Root.C0 = B[J.Root] * CFrame.Angles(lean, 0, 0)
+            end
+            if J.ArmL then
+                J.ArmL.C0 = B[J.ArmL] * CFrame.Angles(math.rad(118) + math.sin(t * 16) * 0.06, 0, math.rad(18))
+            end
+            if J.ArmR then
+                J.ArmR.C0 = B[J.ArmR] * CFrame.Angles(math.rad(118) - math.sin(t * 16) * 0.06, 0, math.rad(-18))
+            end
+
+        elseif kind == "MOONWALK" then
+            local sway = math.sin(t * 2.6)
+            if J.Root then
+                J.Root.C0 = B[J.Root]
+                    * CFrame.new(sway * 0.5, 0, -math.abs(sway) * 0.35)
+                    * CFrame.Angles(math.rad(6), sway * 0.22, 0)
+            end
+            if J.HipL then
+                J.HipL.C0 = B[J.HipL] * CFrame.Angles(sway * 0.5, 0, 0)
+            end
+            if J.HipR then
+                J.HipR.C0 = B[J.HipR] * CFrame.Angles(-sway * 0.5, 0, 0)
+            end
+        end
+    end)
+end
+
+local function playMove(slot)
+    local move = MOVES[slot]
+    if not move or not State.humanoid then return end
+    if State.playing == slot then
+        stopEverything()
+        return
+    end
+    stopEverything()
+
+    if move.Kind == "PROC" then
+        startProc(move.Name)
+    else
+        local anim = Instance.new("Animation")
+        anim.AnimationId = move.Id
+        local loader = State.animator or State.humanoid
+        local ok, track = pcall(function() return loader:LoadAnimation(anim) end)
+        if not ok or not track then
+            setStatus("BLOCKED · you must own " .. move.Name)
+            return
+        end
+        track.Looped = true
+        track.Priority = Enum.AnimationPriority.Action
+        track:Play(0.18)
+        State.track = track
+    end
+
+    State.playing = slot
+    if refreshMoveButtons then refreshMoveButtons() end
+    setStatus("NOW PLAYING · " .. move.Name)
+end
+
+----------------------------------------------------------------
+-- LOCOMOTION RE-SKIN · rewrites the stock Animate clips
+----------------------------------------------------------------
+local LOCO_PATHS = {
+    idle1 = { "idle",  "Animation1" },
+    idle2 = { "idle",  "Animation2" },
+    walk  = { "walk",  "WalkAnim"   },
+    run   = { "run",   "RunAnim"    },
+    jump  = { "jump",  "JumpAnim"   },
+    fall  = { "fall",  "FallAnim"   },
+    climb = { "climb", "ClimbAnim"  },
+    swim  = { "swim",  "SwimAnim"   },
+    sit   = { "sit",   "SitAnim"    },
+}
+
+local function reskinLocomotion(character)
+    local animate = character:FindFirstChild("Animate")
+    if not animate then return end
+    for key, path in pairs(LOCO_PATHS) do
+        local holder = animate:FindFirstChild(path[1])
+        local clip   = holder and holder:FindFirstChild(path[2])
+        if clip then
+            clip.AnimationId = LOCO[key]
+        end
+    end
+end
+
+----------------------------------------------------------------
+-- FX MODULE
+----------------------------------------------------------------
+local function jumpRingFx()
+    local ring = makePart({
+        Shape       = Enum.PartType.Cylinder,
+        Size        = Vector3.new(0.2, 2, 2),
+        Color       = Color3.fromRGB(255, 62, 51),
+        Transparency = 0.15,
+        CFrame      = CFrame.new(State.root.Position - Vector3.new(0, 3, 0))
+                      * CFrame.Angles(0, 0, math.rad(90)),
+    })
+    tween(ring, 0.45, { Size = Vector3.new(0.2, 11, 11), Transparency = 1 })
+    task.delay(0.5, function() ring:Destroy() end)
+end
+
+local function landDustFx()
+    local puff = makePart({
+        Size         = Vector3.new(0.2, 0.2, 0.2),
+        Transparency = 1,
+        CFrame       = CFrame.new(State.root.Position - Vector3.new(0, 3.1, 0)),
+    })
+    local em = Instance.new("ParticleEmitter")
+    em.Texture    = "rbxasset://textures/particles/sparkles_main.dds"
+    em.Rate       = 0
+    em.Lifetime   = NumberRange.new(0.4, 0.7)
+    em.Speed      = NumberRange.new(3, 6)
+    em.SpreadAngle = Vector2.new(80, 80)
+    em.Color      = ColorSequence.new(Color3.fromRGB(190, 198, 214), Color3.fromRGB(120, 128, 144))
+    em.Size       = NumberSequence.new(0.35, 0)
+    em.Parent     = puff
+    em:Emit(16)
+    task.delay(1.2, function() puff:Destroy() end)
+end
+
+local function attachTrail()
+    if State.trail then
+        State.trail:Destroy()
+        State.trail = nil
+    end
+    local root = State.root
+    local a0 = Instance.new("Attachment")
+    a0.Position = Vector3.new(0, 1.2, 0)
+    a0.Parent = root
+    local a1 = Instance.new("Attachment")
+    a1.Position = Vector3.new(0, -1.2, 0)
+    a1.Parent = root
+
+    local trail = Instance.new("Trail")
+    trail.Attachment0 = a0
+    trail.Attachment1 = a1
+    trail.Lifetime = 0.45
+    trail.LightEmission = 0.6
+    trail.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,   Color3.fromRGB(255, 62, 51)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 176, 32)),
+        ColorSequenceKeypoint.new(1,   Color3.fromRGB(63, 216, 226)),
+    })
+    trail.Enabled = FX.Trails or FX.Cook
+    trail.Parent = root
+    State.trail = trail
+end
+
+local function afterimageTick(dt)
+    if not FX.Afterimage or not State.character or not State.humanoid then return end
+    State.ghostClock = State.ghostClock + dt
+    if State.ghostClock < 0.12 then return end
+    State.ghostClock = 0
+    if State.humanoid.MoveDirection.Magnitude < 0.1 then return end
+
+    local ghost = Instance.new("Model")
+    ghost.Name = "Reanim8Ghost"
+    for _, part in ipairs(State.character:GetChildren()) do
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+            local g = part:Clone()
+            g.CanCollide = false
+            g.Material = Enum.Material.Neon
+            g.Color = Color3.fromRGB(255, 82, 70)
+            g.Transparency = 0.55
+            g.Parent = ghost
+        end
+    end
+    ghost.Parent = workspace
+    for _, g in ipairs(ghost:GetChildren()) do
+        tween(g, 0.4, { Transparency = 1 })
+    end
+    task.delay(0.45, function() ghost:Destroy() end)
+end
+
+RunService.Heartbeat:Connect(afterimageTick)
+
+----------------------------------------------------------------
+-- COOK MODE · everything on, everything loud
+----------------------------------------------------------------
+local function setCook(on)
+    FX.Cook = on
+    if State.trail then
+        State.trail.Enabled = FX.Trails or on
+    end
+    if on then
+        if State.root and State.root.Parent and not State.cookLight then
+            local light = Instance.new("PointLight")
+            light.Color = Color3.fromRGB(255, 62, 51)
+            light.Brightness = 3
+            light.Range = 14
+            light.Parent = State.root
+            State.cookLight = light
+        end
+        if State.root and State.root.Parent and not State.cookFire then
+            local fire = Instance.new("ParticleEmitter")
+            fire.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+            fire.Rate = 90
+            fire.Lifetime = NumberRange.new(0.3, 0.6)
+            fire.Speed = NumberRange.new(2, 4)
+            fire.SpreadAngle = Vector2.new(30, 30)
+            fire.Color = ColorSequence.new(Color3.fromRGB(255, 62, 51), Color3.fromRGB(255, 176, 32))
+            fire.Size = NumberSequence.new(0.5, 0)
+            fire.Parent = State.root
+            State.cookFire = fire
+        end
+        if State.humanoid then
+            State.humanoid.WalkSpeed = CONFIG.WalkSpeed * 1.6
+        end
+        setStatus("COOK MODE · LET HIM COOK")
+    else
+        if State.cookLight then State.cookLight:Destroy() State.cookLight = nil end
+        if State.cookFire then State.cookFire:Destroy() State.cookFire = nil end
+        if State.humanoid then
+            State.humanoid.WalkSpeed = CONFIG.WalkSpeed
+        end
+        setStatus("COOK MODE OFF")
+    end
+end
+
+----------------------------------------------------------------
+-- CHARACTER BINDING
+----------------------------------------------------------------
+local function onCharacterAdded(character)
+    stopEverything()
+    State.cookLight, State.cookFire = nil, nil
+    State.character = character
+
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    if not humanoid then return end
+    State.humanoid = humanoid
+    State.root = character:WaitForChild("HumanoidRootPart", 10)
+
+    -- lock the rig: AUTO sniffs the Humanoid, R6/R15 forces script behavior
+    if CONFIG.Rig == "AUTO" then
+        State.rig = humanoid.RigType == Enum.HumanoidRigType.R6 and "R6" or "R15"
+    else
+        State.rig = CONFIG.Rig
+    end
+
+    -- custom movement feel per rig
+    if State.rig == "R6" then
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = CONFIG.JumpPower
+    else
+        humanoid.UseJumpPower = false
+        humanoid.JumpHeight = CONFIG.JumpHeight
+        local animator = humanoid:FindFirstChildOfClass("Animator")
+        if not animator then
+            animator = Instance.new("Animator")
+            animator.Parent = humanoid
+        end
+        State.animator = animator
+    end
+    humanoid.WalkSpeed = CONFIG.WalkSpeed
+
+    reskinLocomotion(character)
+    cacheJoints(character)
+    attachTrail()
+
+    humanoid.StateChanged:Connect(function(_, newState)
+        if newState == Enum.HumanoidStateType.Jumping and FX.JumpRing then
+            jumpRingFx()
+        elseif newState == Enum.HumanoidStateType.Landed and FX.LandDust then
+            landDustFx()
+        end
+    end)
+
+    setStatus("IDLE · " .. State.rig .. " RIG LOCKED")
+end
+
+player.CharacterAdded:Connect(onCharacterAdded)
+if player.Character then
+    onCharacterAdded(player.Character)
+end
+
+----------------------------------------------------------------
+-- GUI · built at runtime, draggable, survives respawn
+----------------------------------------------------------------
+local C = {
+    bg     = Color3.fromRGB(14, 17, 24),
+    panel  = Color3.fromRGB(20, 25, 37),
+    panel2 = Color3.fromRGB(26, 33, 49),
+    line   = Color3.fromRGB(45, 56, 82),
+    ink    = Color3.fromRGB(233, 239, 250),
+    mut    = Color3.fromRGB(141, 153, 176),
+    red    = Color3.fromRGB(255, 62, 51),
+}
+
+local function corner(radius, parent)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius)
+    c.Parent = parent
+    return c
+end
+
+local function frame(parent, props)
+    local f = Instance.new("Frame")
+    f.BorderSizePixel = 0
+    f.BackgroundColor3 = C.panel
+    for k, v in pairs(props) do f[k] = v end
+    f.Parent = parent
+    return f
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "Reanim8"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local okHui, hui = pcall(gethui)
+gui.Parent = okHui and hui or player:WaitForChild("PlayerGui")
+
+local dockGui = Instance.new("ScreenGui")
+dockGui.Name = "Reanim8Dock"
+dockGui.ResetOnSpawn = false
+dockGui.Enabled = false
+dockGui.Parent = gui.Parent
+
+-- main window
+local main = frame(gui, {
+    Size = UDim2.fromOffset(400, 352),
+    Position = UDim2.new(1, -440, 0.5, -176),
+    BackgroundColor3 = C.bg,
+})
+corner(8, main)
+local stroke = Instance.new("UIStroke")
+stroke.Color = C.line
+stroke.Thickness = 1
+stroke.Parent = main
+
+-- title bar + drag
+local title = frame(main, {
+    Size = UDim2.new(1, 0, 0, 34),
+    BackgroundColor3 = C.panel,
+})
+corner(8, title)
+
+local logo = frame(title, {
+    Size = UDim2.fromOffset(10, 10),
+    Position = UDim2.fromOffset(12, 12),
+    BackgroundColor3 = C.red,
+})
+corner(2, logo)
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -90, 1, 0)
+titleText.Position = UDim2.fromOffset(30, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "REANIM8  ·  v2.4.1"
+titleText.Font = Enum.Font.Code
+titleText.TextSize = 13
+titleText.TextColor3 = C.ink
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.Parent = title
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(26, 26)
+closeBtn.Position = UDim2.new(1, -32, 0, 4)
+closeBtn.BackgroundColor3 = C.panel2
+closeBtn.Text = "X"
+closeBtn.Font = Enum.Font.Code
+closeBtn.TextSize = 12
+closeBtn.TextColor3 = C.mut
+closeBtn.Parent = title
+corner(5, closeBtn)
+
+-- reopen dock
+local reopen = Instance.new("TextButton")
+reopen.Size = UDim2.fromOffset(92, 30)
+reopen.Position = UDim2.new(1, -108, 1, -46)
+reopen.BackgroundColor3 = C.red
+reopen.Text = "REANIM8"
+reopen.Font = Enum.Font.GothamBold
+reopen.TextSize = 12
+reopen.TextColor3 = Color3.new(1, 1, 1)
+reopen.Parent = dockGui
+corner(6, reopen)
+
+closeBtn.MouseButton1Click:Connect(function()
+    gui.Enabled = false
+    dockGui.Enabled = true
+end)
+reopen.MouseButton1Click:Connect(function()
+    gui.Enabled = true
+    dockGui.Enabled = false
+end)
+
+local dragging, dragStart, startPos
+title.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = main.Position
+    end
+end)
+title.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+UIS.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local d = input.Position - dragStart
+        main.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + d.X,
+            startPos.Y.Scale, startPos.Y.Offset + d.Y
+        )
+    end
+end)
+
+-- sidebar + pages
+local sidebar = frame(main, {
+    Size = UDim2.new(0, 58, 1, -56),
+    Position = UDim2.fromOffset(0, 34),
+})
+
+local pagesHolder = frame(main, {
+    Size = UDim2.new(1, -58, 1, -56),
+    Position = UDim2.fromOffset(58, 34),
+    BackgroundTransparency = 1,
+})
+
+local TABS = {
+    { Id = "moves", Label = "MOV" },
+    { Id = "loco",  Label = "LOC" },
+    { Id = "fx",    Label = "FX"  },
+    { Id = "set",   Label = "SET" },
+}
+local pages, tabButtons = {}, {}
+
+for i, tab in ipairs(TABS) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -12, 0, 30)
+    btn.Position = UDim2.fromOffset(6, 8 + (i - 1) * 38)
+    btn.BackgroundColor3 = C.panel2
+    btn.Text = tab.Label
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.TextColor3 = C.mut
+    btn.Parent = sidebar
+    corner(6, btn)
+
+    local page = frame(pagesHolder, {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Visible = (i == 1),
+    })
+
+    btn.MouseButton1Click:Connect(function()
+        for _, p in pairs(pages) do p.Visible = false end
+        for _, b in pairs(tabButtons) do
+            b.BackgroundColor3 = C.panel2
+            b.TextColor3 = C.mut
+        end
+        page.Visible = true
+        btn.BackgroundColor3 = C.red
+        btn.TextColor3 = Color3.new(1, 1, 1)
+    end)
+
+    if i == 1 then
+        btn.BackgroundColor3 = C.red
+        btn.TextColor3 = Color3.new(1, 1, 1)
+    end
+    pages[tab.Id] = page
+    tabButtons[tab.Id] = btn
+end
+
+-- MOVES page · the 10 movement buttons
+local grid = Instance.new("UIGridLayout")
+grid.CellSize = UDim2.new(0.5, -5, 0, 30)
+grid.CellPadding = UDim2.fromOffset(10, 8)
+grid.Parent = pages.moves
+local movesPad = Instance.new("UIPadding")
+movesPad.PaddingTop = UDim.new(0, 8)
+movesPad.PaddingLeft = UDim.new(0, 8)
+movesPad.PaddingRight = UDim.new(0, 8)
+movesPad.Parent = pages.moves
+
+for _, move in ipairs(MOVES) do
+    local btn = Instance.new("TextButton")
+    btn.BackgroundColor3 = C.panel2
+    btn.Text = "  " .. move.Slot .. "  ·  " .. move.Name
+    btn.Font = Enum.Font.Code
+    btn.TextSize = 12
+    btn.TextColor3 = C.ink
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.Parent = pages.moves
+    corner(6, btn)
+    btn.MouseButton1Click:Connect(function()
+        playMove(move.Slot)
+    end)
+    State.moveButtons[move.Slot] = btn
+end
+
+refreshMoveButtons = function()
+    for slot, btn in pairs(State.moveButtons) do
+        if State.playing == slot then
+            btn.BackgroundColor3 = C.red
+            btn.TextColor3 = Color3.new(1, 1, 1)
+        else
+            btn.BackgroundColor3 = C.panel2
+            btn.TextColor3 = C.ink
+        end
+    end
+end
+
+-- LOC page · sliders + rig selector
+local locoList = Instance.new("UIListLayout")
+locoList.Padding = UDim.new(0, 7)
+locoList.SortOrder = Enum.SortOrder.LayoutOrder
+locoList.Parent = pages.loco
+local locoPad = Instance.new("UIPadding")
+locoPad.PaddingTop = UDim.new(0, 10)
+locoPad.PaddingLeft = UDim.new(0, 10)
+locoPad.PaddingRight = UDim.new(0, 10)
+locoPad.Parent = pages.loco
+
+local function makeSlider(parent, label, min, max, value, decimals, onChanged)
+    local wrap = frame(parent, {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1,
+    })
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, -60, 0, 14)
+    text.BackgroundTransparency = 1
+    text.Text = label
+    text.TextColor3 = C.mut
+    text.Font = Enum.Font.Gotham
+    text.TextSize = 11
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.Parent = wrap
+
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Size = UDim2.fromOffset(56, 14)
+    valueLabel.Position = UDim2.new(1, -56, 0, 0)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.TextColor3 = C.ink
+    valueLabel.Font = Enum.Font.Code
+    valueLabel.TextSize = 11
+    valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valueLabel.Parent = wrap
+
+    local track = Instance.new("TextButton")
+    track.Size = UDim2.new(1, 0, 0, 6)
+    track.Position = UDim2.new(0, 0, 0, 24)
+    track.BackgroundColor3 = C.panel2
+    track.Text = ""
+    track.AutoButtonColor = false
+    track.Parent = wrap
+    corner(3, track)
+
+    local fill = frame(track, {
+        Size = UDim2.fromScale((value - min) / (max - min), 1),
+        BackgroundColor3 = C.red,
+    })
+    corner(3, fill)
+
+    local function fmt(v)
+        if decimals then
+            return tostring(math.floor(v * 10 + 0.5) / 10)
+        end
+        return tostring(math.floor(v + 0.5))
+    end
+    valueLabel.Text = fmt(value)
+
+    local sliding = false
+    local function update(x)
+        local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local v = min + (max - min) * rel
+        if not decimals then v = math.floor(v + 0.5) end
+        fill.Size = UDim2.fromScale(math.clamp((v - min) / (max - min), 0, 1), 1)
+        valueLabel.Text = fmt(v)
+        onChanged(v)
+    end
+
+    track.MouseButton1Down:Connect(function(x)
+        sliding = true
+        update(x)
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input.Position.X)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            sliding = false
+        end
+    end)
+    return wrap
+end
+
+makeSlider(pages.loco, "WALK SPEED", 8, 100, CONFIG.WalkSpeed, false, function(v)
+    CONFIG.WalkSpeed = v
+    if State.humanoid and not FX.Cook then
+        State.humanoid.WalkSpeed = State.running and v * CONFIG.RunMultiplier or v
+    end
+end)
+makeSlider(pages.loco, "JUMP POWER · R6", 20, 200, CONFIG.JumpPower, false, function(v)
+    CONFIG.JumpPower = v
+    if State.humanoid and State.rig == "R6" then
+        State.humanoid.JumpPower = v
+    end
+end)
+makeSlider(pages.loco, "JUMP HEIGHT · R15", 2, 30, CONFIG.JumpHeight, false, function(v)
+    CONFIG.JumpHeight = v
+    if State.humanoid and State.rig == "R15" then
+        State.humanoid.JumpHeight = v
+    end
+end)
+makeSlider(pages.loco, "RUN MULTIPLIER · L-SHIFT", 1.2, 3, CONFIG.RunMultiplier, true, function(v)
+    CONFIG.RunMultiplier = v
+end)
+
+-- rig selector
+local seg = frame(pages.loco, {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = C.panel2,
+})
+corner(6, seg)
+local segButtons = {}
+for i, choice in ipairs({ "AUTO", "R6", "R15" }) do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1 / 3, -4, 1, -6)
+    b.Position = UDim2.new((i - 1) / 3, 2, 0, 3)
+    b.BackgroundTransparency = 1
+    b.Text = choice
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.TextColor3 = C.mut
+    b.Parent = seg
+    corner(5, b)
+    b.MouseButton1Click:Connect(function()
+        CONFIG.Rig = choice
+        for _, other in pairs(segButtons) do
+            other.BackgroundColor3 = C.panel2
+            other.TextColor3 = C.mut
+        end
+        b.BackgroundColor3 = C.red
+        b.TextColor3 = Color3.new(1, 1, 1)
+        setStatus("RIG PREFERENCE · " .. choice)
+    end)
+    segButtons[choice] = b
+end
+segButtons.AUTO.BackgroundColor3 = C.red
+segButtons.AUTO.TextColor3 = Color3.new(1, 1, 1)
+
+local respawnBtn = Instance.new("TextButton")
+respawnBtn.Size = UDim2.new(1, 0, 0, 30)
+respawnBtn.BackgroundColor3 = C.red
+respawnBtn.Text = "APPLY + RESPAWN CHARACTER"
+respawnBtn.Font = Enum.Font.GothamBold
+respawnBtn.TextSize = 11
+respawnBtn.TextColor3 = Color3.new(1, 1, 1)
+respawnBtn.Parent = pages.loco
+corner(6, respawnBtn)
+respawnBtn.MouseButton1Click:Connect(function()
+    setStatus("RESPAWNING...")
+    player:LoadCharacter()
+end)
+
+-- FX page · toggles
+local fxList = Instance.new("UIListLayout")
+fxList.Padding = UDim.new(0, 7)
+fxList.Parent = pages.fx
+local fxPad = Instance.new("UIPadding")
+fxPad.PaddingTop = UDim.new(0, 10)
+fxPad.PaddingLeft = UDim.new(0, 10)
+fxPad.PaddingRight = UDim.new(0, 10)
+fxPad.Parent = pages.fx
+
+local function makeToggle(parent, label, initial, onChanged)
+    local row = frame(parent, {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = C.panel2,
+    })
+    corner(6, row)
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, -60, 1, 0)
+    text.Position = UDim2.fromOffset(10, 0)
+    text.BackgroundTransparency = 1
+    text.Text = label
+    text.Font = Enum.Font.Gotham
+    text.TextSize = 11
+    text.TextColor3 = C.ink
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.Parent = row
+
+    local knobBg = Instance.new("TextButton")
+    knobBg.Size = UDim2.fromOffset(36, 18)
+    knobBg.Position = UDim2.new(1, -44, 0.5, -9)
+    knobBg.BackgroundColor3 = C.line
+    knobBg.Text = ""
+    knobBg.AutoButtonColor = false
+    knobBg.Parent = row
+    corner(9, knobBg)
+
+    local knob = frame(knobBg, {
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.fromOffset(2, 2),
+        BackgroundColor3 = C.ink,
+    })
+    corner(7, knob)
+
+    local on = initial
+    local function paint()
+        knobBg.BackgroundColor3 = on and C.red or C.line
+        tween(knob, 0.15, {
+            Position = on and UDim2.fromOffset(20, 2) or UDim2.fromOffset(2, 2),
+        })
+    end
+    knobBg.MouseButton1Click:Connect(function()
+        on = not on
+        paint()
+        onChanged(on)
+    end)
+    paint()
+    return row
+end
+
+makeToggle(pages.fx, "TRAIL FX", FX.Trails, function(on)
+    FX.Trails = on
+    if State.trail then State.trail.Enabled = on or FX.Cook end
+end)
+makeToggle(pages.fx, "JUMP RINGS", FX.JumpRing, function(on) FX.JumpRing = on end)
+makeToggle(pages.fx, "LANDING DUST", FX.LandDust, function(on) FX.LandDust = on end)
+makeToggle(pages.fx, "AFTERIMAGE", FX.Afterimage, function(on) FX.Afterimage = on end)
+makeToggle(pages.fx, "COOK MODE [K]", FX.Cook, function(on) setCook(on) end)
+
+-- SET page
+local setList = Instance.new("UIListLayout")
+setList.Padding = UDim.new(0, 7)
+setList.Parent = pages.set
+local setPad = Instance.new("UIPadding")
+setPad.PaddingTop = UDim.new(0, 10)
+setPad.PaddingLeft = UDim.new(0, 10)
+setPad.PaddingRight = UDim.new(0, 10)
+setPad.Parent = pages.set
+
+local bindNote = Instance.new("TextLabel")
+bindNote.Size = UDim2.new(1, 0, 0, 26)
+bindNote.BackgroundTransparency = 1
+bindNote.Text = "[G] GUI · [K] COOK · [R] STOP · [1]-[0] MOVES · [L-SHIFT] RUN"
+bindNote.Font = Enum.Font.Code
+bindNote.TextSize = 11
+bindNote.TextColor3 = C.mut
+bindNote.TextXAlignment = Enum.TextXAlignment.Left
+bindNote.TextYAlignment = Enum.TextYAlignment.Top
+bindNote.Parent = pages.set
+
+local stopBtn = Instance.new("TextButton")
+stopBtn.Size = UDim2.new(1, 0, 0, 30)
+stopBtn.BackgroundColor3 = C.panel2
+stopBtn.Text = "STOP ALL MOVEMENT"
+stopBtn.Font = Enum.Font.GothamBold
+stopBtn.TextSize = 11
+stopBtn.TextColor3 = C.ink
+stopBtn.Parent = pages.set
+corner(6, stopBtn)
+stopBtn.MouseButton1Click:Connect(stopEverything)
+
+local credit = Instance.new("TextLabel")
+credit.Size = UDim2.new(1, 0, 0, 30)
+credit.BackgroundTransparency = 1
+credit.Text = "REANIM8 v2.4.1 · procedural moves are FE-safe on any rig"
+credit.Font = Enum.Font.Code
+credit.TextSize = 10
+credit.TextColor3 = C.mut
+credit.TextXAlignment = Enum.TextXAlignment.Left
+credit.Parent = pages.set
+
+-- status bar
+local statusBar = frame(main, {
+    Size = UDim2.new(1, -58, 0, 22),
+    Position = UDim2.new(0, 58, 1, -22),
+    BackgroundColor3 = C.bg,
+})
+State.statusLabel = Instance.new("TextLabel")
+State.statusLabel.Size = UDim2.new(1, -16, 1, 0)
+State.statusLabel.Position = UDim2.fromOffset(10, 0)
+State.statusLabel.BackgroundTransparency = 1
+State.statusLabel.Text = "REANIM8 READY · PRESS 1-0"
+State.statusLabel.Font = Enum.Font.Code
+State.statusLabel.TextSize = 11
+State.statusLabel.TextColor3 = C.mut
+State.statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+State.statusLabel.Parent = statusBar
+
+----------------------------------------------------------------
+-- GLOBAL KEYBINDS
+----------------------------------------------------------------
+local SLOT_KEYS = {
+    [Enum.KeyCode.One] = 1,   [Enum.KeyCode.Two] = 2,   [Enum.KeyCode.Three] = 3,
+    [Enum.KeyCode.Four] = 4,  [Enum.KeyCode.Five] = 5,  [Enum.KeyCode.Six] = 6,
+    [Enum.KeyCode.Seven] = 7, [Enum.KeyCode.Eight] = 8, [Enum.KeyCode.Nine] = 9,
+    [Enum.KeyCode.Zero] = 10,
+}
+
+UIS.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == CONFIG.GuiKey then
+        gui.Enabled = not gui.Enabled
+        dockGui.Enabled = not gui.Enabled
+    elseif input.KeyCode == CONFIG.CookKey then
+        setCook(not FX.Cook)
+    elseif input.KeyCode == CONFIG.StopKey then
+        stopEverything()
+    elseif input.KeyCode == CONFIG.RunKey then
+        State.running = true
+        if State.humanoid and not FX.Cook then
+            State.humanoid.WalkSpeed = CONFIG.WalkSpeed * CONFIG.RunMultiplier
+        end
+    else
+        local slot = SLOT_KEYS[input.KeyCode]
+        if slot then playMove(slot) end
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.KeyCode == CONFIG.RunKey then
+        State.running = false
+        if State.humanoid and not FX.Cook then
+            State.humanoid.WalkSpeed = CONFIG.WalkSpeed
+        end
+    end
+end)
+
+----------------------------------------------------------------
+-- LOAD FLASH
+----------------------------------------------------------------
+local flash = Instance.new("TextLabel")
+flash.Size = UDim2.fromOffset(250, 34)
+flash.Position = UDim2.new(0.5, -125, 0, -40)
+flash.BackgroundColor3 = C.red
+flash.Text = "REANIM8 LOADED · PRESS G"
+flash.Font = Enum.Font.GothamBold
+flash.TextSize = 13
+flash.TextColor3 = Color3.new(1, 1, 1)
+flash.Parent = gui
+corner(6, flash)
+tween(flash, 0.5, { Position = UDim2.new(0.5, -125, 0, 18) }, Enum.EasingStyle.Back)
+task.delay(2.4, function()
+    tween(flash, 0.4, { BackgroundTransparency = 1, TextTransparency = 1 })
+    task.delay(0.5, function() flash:Destroy() end)
+end)
