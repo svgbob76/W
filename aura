@@ -1,0 +1,1333 @@
+-- Certified Aura Farmer
+-- Place this LocalScript inside StarterPlayer > StarterPlayerScripts
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local Lighting = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera or workspace:WaitForChild("Camera")
+
+-----------------------------------------------------------
+-- STATE
+-----------------------------------------------------------
+
+local states = {
+	SlowMo = false,
+	Ragdoll = false,
+	NoClip = false,
+	AirJump = false,
+	Shield = false,
+	Overdrive = false,
+}
+
+local noclipUp = false
+local noclipDown = false
+
+local toggles = {}
+local lastTimes = {}
+local burstToken = 0
+
+-----------------------------------------------------------
+-- HELPERS
+-----------------------------------------------------------
+
+local function getCharacter()
+	local char = player.Character
+	if not char then
+		return nil
+	end
+
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart")
+		or char:FindFirstChild("Torso")
+		or char:FindFirstChild("UpperTorso")
+
+	if not hum or not root then
+		return nil
+	end
+
+	return char, hum, root
+end
+
+local function setJumpVelocity(hum, velocity)
+	if not hum then
+		return
+	end
+
+	if hum.UseJumpPower then
+		hum.JumpPower = velocity
+	else
+		hum.JumpHeight = (velocity * velocity) / (2 * math.max(workspace.Gravity, 1))
+	end
+end
+
+local function getJumpVelocity(hum)
+	if not hum then
+		return 50
+	end
+
+	if hum.UseJumpPower then
+		return hum.JumpPower
+	end
+
+	return math.sqrt(2 * math.max(workspace.Gravity, 1) * hum.JumpHeight)
+end
+
+local function refreshMovement()
+	local char, hum, root = getCharacter()
+	if not hum then
+		return
+	end
+
+	if states.Ragdoll then
+		hum.WalkSpeed = 0
+		setJumpVelocity(hum, 0)
+		return
+	end
+
+	local speed = 16
+	local jump = 50
+
+	if states.Overdrive then
+		speed = 42
+		jump = 85
+	elseif states.SlowMo then
+		speed = 6
+		jump = 20
+	end
+
+	hum.WalkSpeed = speed
+	setJumpVelocity(hum, jump)
+end
+
+local function setSlowVisual(on)
+	if on then
+		local cc = Lighting:FindFirstChild("CAFSlowCC")
+		if not cc then
+			cc = Instance.new("ColorCorrectionEffect")
+			cc.Name = "CAFSlowCC"
+			cc.Parent = Lighting
+		end
+
+		cc.Contrast = 0.18
+		cc.Saturation = 0.08
+		cc.Brightness = 0.02
+		cc.TintColor = Color3.fromRGB(215, 230, 255)
+
+		local blur = Lighting:FindFirstChild("CAFSlowBlur")
+		if not blur then
+			blur = Instance.new("BlurEffect")
+			blur.Name = "CAFSlowBlur"
+			blur.Parent = Lighting
+		end
+
+		blur.Size = 3
+
+		TweenService:Create(camera, TweenInfo.new(0.35), {
+			FieldOfView = 56,
+		}):Play()
+	else
+		local cc = Lighting:FindFirstChild("CAFSlowCC")
+		if cc then
+			cc:Destroy()
+		end
+
+		local blur = Lighting:FindFirstChild("CAFSlowBlur")
+		if blur then
+			blur:Destroy()
+		end
+
+		TweenService:Create(camera, TweenInfo.new(0.3), {
+			FieldOfView = 70,
+		}):Play()
+	end
+end
+
+local function saveCollision(part)
+	if part:GetAttribute("CAFOrigCollide") == nil then
+		part:SetAttribute("CAFOrigCollide", part.CanCollide)
+	end
+end
+
+local function restoreCollision(char)
+	for _, obj in char:GetDescendants() do
+		if obj:IsA("BasePart") then
+			local original = obj:GetAttribute("CAFOrigCollide")
+			if original ~= nil then
+				obj.CanCollide = original
+			end
+		end
+	end
+end
+
+local function effectsFolder()
+	local folder = workspace:FindFirstChild("CAFEffects")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "CAFEffects"
+		folder.Parent = workspace
+	end
+	return folder
+end
+
+local function spawnParticles(parent, color, duration, rate, size)
+	if not parent then
+		return
+	end
+
+	local emitter = Instance.new("ParticleEmitter")
+	emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	emitter.Rate = rate or 100
+	emitter.Lifetime = NumberRange.new(0.35, 0.9)
+	emitter.Speed = NumberRange.new(3, 10)
+	emitter.SpreadAngle = Vector2.new(180, 180)
+	emitter.Color = ColorSequence.new(color or Color3.fromRGB(180, 120, 255))
+	emitter.Size = NumberSequence.new(size or 0.35, 0)
+	emitter.Transparency = NumberSequence.new(0.2, 1)
+	emitter.LightEmission = 1
+	emitter.Parent = parent
+
+	emitter:Emit(25)
+
+	task.delay(0.15, function()
+		if emitter and emitter.Parent then
+			emitter.Rate = 0
+		end
+	end)
+
+	Debris:AddItem(emitter, duration or 1.2)
+end
+
+local function spawnLight(parent, color, range, brightness, duration)
+	if not parent then
+		return
+	end
+
+	local light = Instance.new("PointLight")
+	light.Color = color
+	light.Range = range or 12
+	light.Brightness = brightness or 2
+	light.Parent = parent
+
+	Debris:AddItem(light, duration or 1)
+end
+
+local function spawnTrail(root, color, duration)
+	if not root then
+		return
+	end
+
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(0, 1, 0)
+	a0.Parent = root
+
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(0, -1, 0)
+	a1.Parent = root
+
+	local trail = Instance.new("Trail")
+	trail.Attachment0 = a0
+	trail.Attachment1 = a1
+	trail.Lifetime = 0.3
+	trail.MinLength = 0.1
+	trail.Color = ColorSequence.new(color)
+	trail.LightEmission = 1
+	trail.Parent = root
+
+	Debris:AddItem(trail, duration or 0.75)
+	Debris:AddItem(a0, duration + 0.75)
+	Debris:AddItem(a1, duration + 0.75)
+end
+
+local function applyBodyVelocity(root, velocity, duration)
+	if not root then
+		return
+	end
+
+	local bv = Instance.new("BodyVelocity")
+	bv.MaxForce = Vector3.new(1000000, 1000000, 1000000)
+	bv.Velocity = velocity
+	bv.Parent = root
+
+	Debris:AddItem(bv, duration or 0.25)
+end
+
+local function applyAngularVelocity(root, angularVelocity, duration)
+	if not root then
+		return
+	end
+
+	local attachment = root:FindFirstChild("CAFAngularAttach")
+	if not attachment then
+		attachment = Instance.new("Attachment")
+		attachment.Name = "CAFAngularAttach"
+		attachment.Parent = root
+	end
+
+	local av = Instance.new("AngularVelocity")
+	av.Attachment0 = attachment
+	av.MaxTorque = Vector3.new(1000000, 1000000, 1000000)
+	av.AngularVelocity = angularVelocity
+	av.Parent = root
+
+	Debris:AddItem(av, duration or 0.3)
+end
+
+local function shakeCamera(preset, magnitude)
+	pcall(function()
+		camera:Shake(preset, magnitude or 1)
+	end)
+end
+
+local function shockwave(root, color, maxSize)
+	if not root then
+		return
+	end
+
+	local part = Instance.new("Part")
+	part.Shape = Enum.PartType.Ball
+	part.Material = Enum.Material.Neon
+	part.Color = color
+	part.Transparency = 0.35
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Size = Vector3.new(1, 1, 1)
+	part.CFrame = root.CFrame * CFrame.new(0, -2, 0)
+	part.Parent = effectsFolder()
+
+	TweenService:Create(part, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(maxSize, maxSize, maxSize),
+		Transparency = 1,
+	}):Play()
+
+	Debris:AddItem(part, 0.8)
+end
+
+-----------------------------------------------------------
+-- RAGDOLL
+-----------------------------------------------------------
+
+local function applyRagdoll(enable)
+	local char, hum, root = getCharacter()
+	if not char or not hum or not root then
+		return
+	end
+
+	if enable then
+		if char:GetAttribute("CAFRagdolled") then
+			return
+		end
+
+		char:SetAttribute("CAFRagdolled", true)
+
+		for _, part in char:GetDescendants() do
+			if part:IsA("BasePart") then
+				saveCollision(part)
+			end
+		end
+
+		for _, part in char:GetDescendants() do
+			if part:IsA("BasePart") then
+				part.CanCollide = part ~= root
+			end
+		end
+
+		local folder = char:FindFirstChild("CAFRagdollFolder")
+		if not folder then
+			folder = Instance.new("Folder")
+			folder.Name = "CAFRagdollFolder"
+			folder.Parent = char
+		end
+
+		for _, motor in char:GetDescendants() do
+			if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
+				motor.Enabled = false
+
+				local a0 = Instance.new("Attachment")
+				a0.CFrame = motor.C0
+				a0.Name = "CAFRagdollAtt"
+				a0:SetAttribute("CAFRagdollAtt", true)
+				a0.Parent = motor.Part0
+
+				local a1 = Instance.new("Attachment")
+				a1.CFrame = motor.C1
+				a1.Name = "CAFRagdollAtt"
+				a1:SetAttribute("CAFRagdollAtt", true)
+				a1.Parent = motor.Part1
+
+				local ballSocket = Instance.new("BallSocketConstraint")
+				ballSocket.Name = "CAFRagdoll_" .. motor.Name
+				ballSocket.Attachment0 = a0
+				ballSocket.Attachment1 = a1
+				ballSocket.LimitsEnabled = false
+				ballSocket.Parent = folder
+			end
+		end
+
+		hum.PlatformStand = true
+		hum.AutoRotate = false
+		hum.WalkSpeed = 0
+		setJumpVelocity(hum, 0)
+		hum:ChangeState(Enum.HumanoidStateType.Physics)
+
+		root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + Vector3.new(
+			math.random(-4, 4),
+			8,
+			math.random(-4, 4)
+		)
+
+		root.AssemblyAngularVelocity = root.AssemblyAngularVelocity + Vector3.new(
+			math.random(-3, 3),
+			math.random(-3, 3),
+			math.random(-3, 3)
+		)
+	else
+		if not char:GetAttribute("CAFRagdolled") then
+			return
+		end
+
+		char:SetAttribute("CAFRagdolled", false)
+
+		local rootMotor = nil
+
+		for _, motor in char:GetDescendants() do
+			if motor:IsA("Motor6D") and (motor.Name == "Root" or motor.Part0 == root) then
+				rootMotor = motor
+				break
+			end
+		end
+
+		local torso = char:FindFirstChild("LowerTorso")
+			or char:FindFirstChild("Torso")
+			or char:FindFirstChild("UpperTorso")
+
+		if rootMotor and torso and root then
+			pcall(function()
+				root.CFrame = torso.CFrame * rootMotor.C1 * rootMotor.C0:Inverse()
+			end)
+		end
+
+		local folder = char:FindFirstChild("CAFRagdollFolder")
+		if folder then
+			folder:Destroy()
+		end
+
+		for _, motor in char:GetDescendants() do
+			if motor:IsA("Motor6D") then
+				motor.Enabled = true
+			end
+		end
+
+		for _, obj in char:GetDescendants() do
+			if obj:IsA("Attachment") and obj:GetAttribute("CAFRagdollAtt") then
+				obj:Destroy()
+			end
+		end
+
+		restoreCollision(char)
+
+		hum.PlatformStand = false
+		hum.AutoRotate = true
+		hum:ChangeState(Enum.HumanoidStateType.Running)
+	end
+end
+
+-----------------------------------------------------------
+-- NOCLIP / WALL PHASE
+-----------------------------------------------------------
+
+local function applyNoClip(enable)
+	local char, hum, root = getCharacter()
+	if not char or not hum or not root then
+		return
+	end
+
+	if enable then
+		if char:GetAttribute("CAFNoClipped") then
+			return
+		end
+
+		char:SetAttribute("CAFNoClipped", true)
+
+		for _, part in char:GetDescendants() do
+			if part:IsA("BasePart") then
+				saveCollision(part)
+				part.CanCollide = false
+			end
+		end
+
+		hum.PlatformStand = true
+		hum.AutoRotate = false
+		hum:ChangeState(Enum.HumanoidStateType.Physics)
+	else
+		if not char:GetAttribute("CAFNoClipped") then
+			return
+		end
+
+		char:SetAttribute("CAFNoClipped", false)
+
+		restoreCollision(char)
+
+		hum.PlatformStand = false
+		hum.AutoRotate = true
+		hum:ChangeState(Enum.HumanoidStateType.Running)
+
+		root.AssemblyLinearVelocity = Vector3.zero
+
+		noclipUp = false
+		noclipDown = false
+	end
+end
+
+-----------------------------------------------------------
+-- GUI STATE UPDATER
+-----------------------------------------------------------
+
+local function updateToggle(name, on)
+	local button = toggles[name]
+	if not button then
+		return
+	end
+
+	local baseText = button:GetAttribute("BaseText") or button.Text
+	button.Text = baseText .. (on and " ON" or " OFF")
+
+	local stroke = button:FindFirstChildOfClass("UIStroke")
+
+	if on then
+		button.BackgroundColor3 = Color3.fromRGB(25, 110, 75)
+		if stroke then
+			stroke.Color = Color3.fromRGB(90, 255, 170)
+		end
+	else
+		button.BackgroundColor3 = Color3.fromRGB(36, 39, 50)
+		if stroke then
+			stroke.Color = Color3.fromRGB(75, 80, 100)
+		end
+	end
+end
+
+local function updateAllToggles()
+	for name, _ in pairs(toggles) do
+		updateToggle(name, states[name] or false)
+	end
+end
+
+-----------------------------------------------------------
+-- MOVES
+-----------------------------------------------------------
+
+local function defaultWalk()
+	local char, hum, root = getCharacter()
+
+	applyRagdoll(false)
+	applyNoClip(false)
+
+	states.SlowMo = false
+	states.Ragdoll = false
+	states.NoClip = false
+	states.Overdrive = false
+	states.AirJump = false
+
+	setSlowVisual(false)
+	refreshMovement()
+
+	updateToggle("SlowMo", false)
+	updateToggle("Ragdoll", false)
+	updateToggle("NoClip", false)
+	updateToggle("AirJump", false)
+
+	if root then
+		spawnParticles(root, Color3.fromRGB(255, 255, 255), 0.5, 60, 0.25)
+	end
+end
+
+local function doge(direction)
+	local char, hum, root = getCharacter()
+	if not root or states.Ragdoll then
+		return
+	end
+
+	local now = tick()
+	if lastTimes.Doge and now - lastTimes.Doge < 0.18 then
+		return
+	end
+
+	lastTimes.Doge = now
+
+	local dir
+
+	if direction == "Left" then
+		dir = -root.CFrame.RightVector
+	elseif direction == "Right" then
+		dir = root.CFrame.RightVector
+	else
+		dir = -root.CFrame.LookVector
+	end
+
+	dir = Vector3.new(dir.X, 0, dir.Z)
+
+	if dir.Magnitude > 0 then
+		dir = dir.Unit
+	end
+
+	if states.NoClip then
+		root.CFrame = root.CFrame + dir * 18
+
+		local spin
+
+		if direction == "Left" then
+			spin = Vector3.new(0, -28, 0)
+		elseif direction == "Right" then
+			spin = Vector3.new(0, 28, 0)
+		else
+			spin = root.CFrame.RightVector * -24
+		end
+
+		applyAngularVelocity(root, spin, 0.3)
+		spawnTrail(root, Color3.fromRGB(120, 200, 255), 0.5)
+		spawnParticles(root, Color3.fromRGB(120, 200, 255), 0.6, 80, 0.3)
+		shakeCamera(Enum.CameraShakePresets.Bump, 0.35)
+
+		return
+	end
+
+	local velocity = dir * 85 + Vector3.new(
+		0,
+		math.max(root.AssemblyLinearVelocity.Y, 0) + 12,
+		0
+	)
+
+	applyBodyVelocity(root, velocity, 0.24)
+
+	local spin
+
+	if direction == "Left" then
+		spin = Vector3.new(0, -28, 0)
+	elseif direction == "Right" then
+		spin = Vector3.new(0, 28, 0)
+	else
+		spin = root.CFrame.RightVector * -24
+	end
+
+	applyAngularVelocity(root, spin, 0.3)
+	spawnTrail(root, Color3.fromRGB(120, 200, 255), 0.5)
+	spawnParticles(root, Color3.fromRGB(120, 200, 255), 0.6, 80, 0.3)
+	shakeCamera(Enum.CameraShakePresets.Bump, 0.35)
+end
+
+local function auraBurst()
+	local char, hum, root = getCharacter()
+	if not root or states.Ragdoll then
+		return
+	end
+
+	local now = tick()
+	if lastTimes.Burst and now - lastTimes.Burst < 6 then
+		return
+	end
+
+	lastTimes.Burst = now
+
+	states.Overdrive = true
+	refreshMovement()
+
+	burstToken = burstToken + 1
+	local myToken = burstToken
+
+	spawnParticles(root, Color3.fromRGB(255, 200, 60), 3, 220, 0.55)
+	spawnLight(root, Color3.fromRGB(255, 200, 60), 16, 3, 5)
+	spawnTrail(root, Color3.fromRGB(255, 200, 60), 4)
+
+	TweenService:Create(camera, TweenInfo.new(0.25), {
+		FieldOfView = 82,
+	}):Play()
+
+	shakeCamera(Enum.CameraShakePresets.Explosion, 0.65)
+
+	root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + Vector3.new(0, 35, 0)
+
+	task.delay(5, function()
+		if burstToken ~= myToken then
+			return
+		end
+
+		states.Overdrive = false
+		refreshMovement()
+
+		if states.SlowMo then
+			setSlowVisual(true)
+		else
+			TweenService:Create(camera, TweenInfo.new(0.4), {
+				FieldOfView = 70,
+			}):Play()
+		end
+	end)
+end
+
+local function phantomDash()
+	local char, hum, root = getCharacter()
+	if not root or states.Ragdoll then
+		return
+	end
+
+	local now = tick()
+	if lastTimes.Dash and now - lastTimes.Dash < 0.5 then
+		return
+	end
+
+	lastTimes.Dash = now
+
+	local look = root.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+
+	if flat.Magnitude > 0 then
+		flat = flat.Unit
+	end
+
+	if states.NoClip then
+		root.CFrame = root.CFrame + flat * 30
+		spawnTrail(root, Color3.fromRGB(170, 90, 255), 0.7)
+		spawnParticles(root, Color3.fromRGB(170, 90, 255), 0.7, 140, 0.4)
+		shakeCamera(Enum.CameraShakePresets.Bump, 0.45)
+		return
+	end
+
+	local velocity = flat * 130 + Vector3.new(
+		0,
+		math.max(root.AssemblyLinearVelocity.Y, 0) + 10,
+		0
+	)
+
+	applyBodyVelocity(root, velocity, 0.2)
+	spawnTrail(root, Color3.fromRGB(170, 90, 255), 0.7)
+	spawnParticles(root, Color3.fromRGB(170, 90, 255), 0.7, 140, 0.4)
+	shakeCamera(Enum.CameraShakePresets.Bump, 0.45)
+end
+
+local function titanStomp()
+	local char, hum, root = getCharacter()
+	if not root or states.Ragdoll then
+		return
+	end
+
+	local now = tick()
+	if lastTimes.Stomp and now - lastTimes.Stomp < 2.2 then
+		return
+	end
+
+	lastTimes.Stomp = now
+
+	if states.NoClip then
+		shockwave(root, Color3.fromRGB(255, 120, 40), 24)
+		spawnParticles(root, Color3.fromRGB(255, 120, 40), 0.8, 180, 0.6)
+		shakeCamera(Enum.CameraShakePresets.Explosion, 1)
+		return
+	end
+
+	local grounded = hum.FloorMaterial ~= Enum.Material.Air
+
+	if grounded then
+		root.AssemblyLinearVelocity = Vector3.new(
+			root.AssemblyLinearVelocity.X,
+			-10,
+			root.AssemblyLinearVelocity.Z
+		)
+
+		shockwave(root, Color3.fromRGB(255, 120, 40), 22)
+		spawnParticles(root, Color3.fromRGB(255, 120, 40), 0.8, 180, 0.6)
+		shakeCamera(Enum.CameraShakePresets.Explosion, 1)
+	else
+		applyBodyVelocity(root, Vector3.new(
+			root.AssemblyLinearVelocity.X,
+			-180,
+			root.AssemblyLinearVelocity.Z
+		), 0.16)
+
+		spawnTrail(root, Color3.fromRGB(255, 120, 40), 0.4)
+
+		task.delay(0.25, function()
+			local _, _, currentRoot = getCharacter()
+			if currentRoot then
+				shockwave(currentRoot, Color3.fromRGB(255, 120, 40), 30)
+				shakeCamera(Enum.CameraShakePresets.Explosion, 1.2)
+			end
+		end)
+	end
+end
+
+local function applyShield(enable)
+	local char, hum, root = getCharacter()
+	if not char then
+		return
+	end
+
+	if enable then
+		local forceField = char:FindFirstChild("CAFShield")
+		if not forceField then
+			forceField = Instance.new("ForceField")
+			forceField.Name = "CAFShield"
+			forceField.Parent = char
+		end
+
+		forceField.Visible = true
+
+		if root then
+			spawnParticles(root, Color3.fromRGB(70, 190, 255), 1.2, 120, 0.45)
+			spawnLight(root, Color3.fromRGB(70, 190, 255), 12, 2, 1.2)
+		end
+	else
+		local forceField = char:FindFirstChild("CAFShield")
+		if forceField then
+			forceField:Destroy()
+		end
+	end
+end
+
+-----------------------------------------------------------
+-- GUI
+-----------------------------------------------------------
+
+local playerGui = player:WaitForChild("PlayerGui")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "CertifiedAuraFarmer"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999999
+gui.Parent = playerGui
+
+local main = Instance.new("Frame")
+main.Name = "MainFrame"
+main.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+main.BackgroundTransparency = 0.12
+main.BorderSizePixel = 0
+main.Active = true
+main.Visible = true
+main.Position = UDim2.new(0, 12, 0, 70)
+main.Parent = gui
+
+if UserInputService.TouchEnabled then
+	main.Size = UDim2.new(0.68, 0, 0.62, 0)
+else
+	main.Size = UDim2.fromOffset(270, 400)
+end
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.Parent = main
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(90, 70, 160)
+mainStroke.Thickness = 1.5
+mainStroke.Parent = main
+
+local mainPadding = Instance.new("UIPadding")
+mainPadding.PaddingTop = UDim.new(0, 8)
+mainPadding.PaddingBottom = UDim.new(0, 8)
+mainPadding.PaddingLeft = UDim.new(0, 8)
+mainPadding.PaddingRight = UDim.new(0, 8)
+mainPadding.Parent = main
+
+local sizeConstraint = Instance.new("UISizeConstraint")
+sizeConstraint.MaxSize = Vector2.new(360, 560)
+sizeConstraint.MinSize = Vector2.new(230, 280)
+sizeConstraint.Parent = main
+
+local title = Instance.new("TextLabel")
+title.BackgroundTransparency = 1
+title.Size = UDim2.new(1, -16, 0, 30)
+title.Position = UDim2.new(0, 8, 0, 4)
+title.Text = "CERTIFIED AURA FARMER"
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 18
+title.TextColor3 = Color3.fromRGB(180, 120, 255)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = main
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Position = UDim2.new(0, 8, 0, 36)
+scroll.Size = UDim2.new(1, -16, 1, -44)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 4
+scroll.ScrollBarImageColor3 = Color3.fromRGB(180, 120, 255)
+scroll.Parent = main
+
+local list = Instance.new("UIListLayout")
+list.Padding = UDim.new(0, 6)
+list.SortOrder = Enum.SortOrder.LayoutOrder
+list.Parent = scroll
+
+local scrollPadding = Instance.new("UIPadding")
+scrollPadding.PaddingTop = UDim.new(0, 2)
+scrollPadding.PaddingBottom = UDim.new(0, 2)
+scrollPadding.Parent = scroll
+
+list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	scroll.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 8)
+end)
+
+local order = 0
+
+local function nextOrder()
+	order = order + 1
+	return order
+end
+
+local function addLabel(text)
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Size = UDim2.new(1, 0, 0, 20)
+	label.Text = text
+	label.Font = Enum.Font.GothamSemiBold
+	label.TextSize = 13
+	label.TextColor3 = Color3.fromRGB(160, 165, 185)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.LayoutOrder = nextOrder()
+	label.Parent = scroll
+	return label
+end
+
+local function createButton(text, color)
+	local button = Instance.new("TextButton")
+	button.BackgroundColor3 = color or Color3.fromRGB(36, 39, 50)
+	button.TextColor3 = Color3.fromRGB(245, 245, 255)
+	button.Font = Enum.Font.GothamBold
+	button.TextSize = 15
+	button.TextWrapped = true
+	button.BorderSizePixel = 0
+	button.Size = UDim2.new(1, 0, 0, 38)
+	button.AutoButtonColor = true
+	button.LayoutOrder = nextOrder()
+	button.Parent = scroll
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = button
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(75, 80, 100)
+	stroke.Thickness = 1.1
+	stroke.Parent = button
+
+	button.Text = text
+
+	return button
+end
+
+local function makeToggle(name, text, color, callback)
+	local button = createButton(text, color)
+	button.Name = name
+	button:SetAttribute("BaseText", text)
+
+	toggles[name] = button
+	updateToggle(name, false)
+
+	button.MouseButton1Click:Connect(callback)
+
+	return button
+end
+
+local function makeAction(text, color, callback)
+	local button = createButton(text, color)
+
+	button.MouseButton1Click:Connect(function()
+		callback()
+
+		local oldColor = button.BackgroundColor3
+		button.BackgroundColor3 = Color3.fromRGB(90, 95, 120)
+
+		task.delay(0.12, function()
+			if button and button.Parent then
+				button.BackgroundColor3 = oldColor
+			end
+		end)
+	end)
+
+	return button
+end
+
+local function makeHoldButton(text, color, setFunction)
+	local button = createButton(text, color)
+
+	local function press()
+		setFunction(true)
+		button.BackgroundColor3 = Color3.fromRGB(90, 95, 120)
+	end
+
+	local function release()
+		setFunction(false)
+		button.BackgroundColor3 = Color3.fromRGB(36, 39, 50)
+	end
+
+	button.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			press()
+		end
+	end)
+
+	button.InputEnded:Connect(function()
+		release()
+	end)
+
+	button.MouseButton1Up:Connect(release)
+	button.MouseLeave:Connect(release)
+
+	return button
+end
+
+-- Menu hide button
+
+local mini = Instance.new("TextButton")
+mini.Size = UDim2.fromOffset(48, 48)
+mini.Position = UDim2.new(0, 12, 0, 12)
+mini.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+mini.Text = "X"
+mini.TextSize = 24
+mini.Font = Enum.Font.GothamBold
+mini.TextColor3 = Color3.fromRGB(255, 255, 255)
+mini.BorderSizePixel = 0
+mini.Parent = gui
+
+local miniCorner = Instance.new("UICorner")
+miniCorner.CornerRadius = UDim.new(0, 10)
+miniCorner.Parent = mini
+
+local miniStroke = Instance.new("UIStroke")
+miniStroke.Color = Color3.fromRGB(90, 70, 160)
+miniStroke.Thickness = 1.5
+miniStroke.Parent = mini
+
+mini.MouseButton1Click:Connect(function()
+	main.Visible = not main.Visible
+	mini.Text = main.Visible and "X" or "☰"
+end)
+
+-----------------------------------------------------------
+-- CREATE BUTTONS
+-----------------------------------------------------------
+
+addLabel("MAIN MOVEMENT")
+
+makeToggle("SlowMo", "Slow Motion", nil, function()
+	states.SlowMo = not states.SlowMo
+
+	if states.SlowMo then
+		setSlowVisual(true)
+	else
+		setSlowVisual(false)
+	end
+
+	refreshMovement()
+	updateToggle("SlowMo", states.SlowMo)
+end)
+
+makeToggle("Ragdoll", "Ragdoll", nil, function()
+	states.Ragdoll = not states.Ragdoll
+
+	if states.Ragdoll then
+		if states.NoClip then
+			states.NoClip = false
+			applyNoClip(false)
+			updateToggle("NoClip", false)
+		end
+
+		applyRagdoll(true)
+	else
+		applyRagdoll(false)
+	end
+
+	refreshMovement()
+	updateToggle("Ragdoll", states.Ragdoll)
+end)
+
+makeAction("Default Walk", Color3.fromRGB(45, 60, 95), defaultWalk)
+
+makeToggle("NoClip", "Wall Phase / NoClip", nil, function()
+	states.NoClip = not states.NoClip
+
+	if states.NoClip then
+		if states.Ragdoll then
+			states.Ragdoll = false
+			applyRagdoll(false)
+			updateToggle("Ragdoll", false)
+		end
+
+		applyNoClip(true)
+	else
+		applyNoClip(false)
+	end
+
+	refreshMovement()
+	updateToggle("NoClip", states.NoClip)
+end)
+
+makeHoldButton("NoClip Rise (Hold)", Color3.fromRGB(50, 55, 80), function(value)
+	noclipUp = value
+end)
+
+makeHoldButton("NoClip Sink (Hold)", Color3.fromRGB(50, 55, 80), function(value)
+	noclipDown = value
+end)
+
+addLabel("DOGE")
+
+makeAction("Doge Left", Color3.fromRGB(35, 70, 95), function()
+	doge("Left")
+end)
+
+makeAction("Doge Back", Color3.fromRGB(35, 70, 95), function()
+	doge("Back")
+end)
+
+makeAction("Doge Right", Color3.fromRGB(35, 70, 95), function()
+	doge("Right")
+end)
+
+addLabel("AURA MOVES")
+
+makeAction("Aura Burst", Color3.fromRGB(110, 75, 20), auraBurst)
+
+makeAction("Phantom Dash", Color3.fromRGB(75, 35, 110), phantomDash)
+
+makeAction("Titan Stomp", Color3.fromRGB(110, 45, 20), titanStomp)
+
+makeToggle("AirJump", "Sky Step", nil, function()
+	states.AirJump = not states.AirJump
+	updateToggle("AirJump", states.AirJump)
+end)
+
+makeToggle("Shield", "Aura Shield", nil, function()
+	states.Shield = not states.Shield
+	applyShield(states.Shield)
+	updateToggle("Shield", states.Shield)
+end)
+
+-----------------------------------------------------------
+-- INPUT
+-----------------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+
+	if states.NoClip then
+		if input.KeyCode == Enum.KeyCode.Space then
+			noclipUp = true
+		elseif input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.C then
+			noclipDown = true
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.Space then
+		noclipUp = false
+	elseif input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.C then
+		noclipDown = false
+	end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+	if not states.AirJump then
+		return
+	end
+
+	local char, hum, root = getCharacter()
+	if not hum or not root then
+		return
+	end
+
+	if states.Ragdoll or states.NoClip then
+		return
+	end
+
+	if hum.FloorMaterial == Enum.Material.Air then
+		local velocity = getJumpVelocity(hum)
+
+		root.AssemblyLinearVelocity = Vector3.new(
+			root.AssemblyLinearVelocity.X,
+			math.max(velocity, 55),
+			root.AssemblyLinearVelocity.Z
+		)
+
+		spawnParticles(root, Color3.fromRGB(120, 255, 190), 0.5, 60, 0.3)
+		shakeCamera(Enum.CameraShakePresets.Bump, 0.25)
+	end
+end)
+
+-----------------------------------------------------------
+-- FRAME LOOPS
+-----------------------------------------------------------
+
+local cachedChar = nil
+local cachedParts = {}
+local cachedConn = nil
+
+local function getCharParts()
+	local char = getCharacter()
+
+	if not char then
+		return {}
+	end
+
+	if cachedChar ~= char then
+		if cachedConn then
+			cachedConn:Disconnect()
+		end
+
+		cachedChar = char
+		cachedParts = {}
+
+		for _, part in char:GetDescendants() do
+			if part:IsA("BasePart") then
+				table.insert(cachedParts, part)
+			end
+		end
+
+		cachedConn = char.DescendantAdded:Connect(function(obj)
+			if obj:IsA("BasePart") then
+				table.insert(cachedParts, obj)
+			end
+		end)
+	end
+
+	return cachedParts
+end
+
+RunService.RenderStepped:Connect(function()
+	local char, hum, root = getCharacter()
+	if not char or not hum or not root then
+		return
+	end
+
+	camera = workspace.CurrentCamera or camera
+
+	if states.NoClip then
+		local move = hum.MoveDirection
+		local camCF = camera.CFrame
+
+		local flatLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+		if flatLook.Magnitude > 0.001 then
+			flatLook = flatLook.Unit
+		else
+			flatLook = Vector3.new(0, 0, -1)
+		end
+
+		local flatRight = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
+		if flatRight.Magnitude > 0.001 then
+			flatRight = flatRight.Unit
+		else
+			flatRight = Vector3.new(1, 0, 0)
+		end
+
+		local forward = move:Dot(flatLook)
+		local right = move:Dot(flatRight)
+
+		local vertical = 0
+
+		if noclipUp then
+			vertical = vertical + 1
+		end
+
+		if noclipDown then
+			vertical = vertical - 1
+		end
+
+		local input = Vector3.new(right, vertical, forward)
+
+		if input.Magnitude > 1 then
+			input = input.Unit
+		end
+
+		local worldDirection = camCF:VectorToWorldSpace(input)
+
+		local speed = 65
+
+		if states.SlowMo then
+			speed = 16
+		end
+
+		if states.Overdrive then
+			speed = 90
+		end
+
+		root.AssemblyLinearVelocity = worldDirection * speed
+
+		local flatWorld = Vector3.new(worldDirection.X, 0, worldDirection.Z)
+
+		if flatWorld.Magnitude > 0.1 then
+			local target = CFrame.lookAt(root.Position, root.Position + flatWorld.Unit)
+			root.CFrame = root.CFrame:Lerp(target, 0.25)
+		end
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	local char = getCharacter()
+	if not char then
+		return
+	end
+
+	if states.SlowMo and not states.Overdrive then
+		for _, part in ipairs(getCharParts()) do
+			if part and part.Parent then
+				local linearVelocity = part.AssemblyLinearVelocity
+				local maxLinear = 9
+
+				if linearVelocity.Magnitude > maxLinear then
+					part.AssemblyLinearVelocity = linearVelocity.Unit * maxLinear
+				end
+
+				local angularVelocity = part.AssemblyAngularVelocity
+				local maxAngular = 4
+
+				if angularVelocity.Magnitude > maxAngular then
+					part.AssemblyAngularVelocity = angularVelocity.Unit * maxAngular
+				end
+			end
+		end
+	end
+end)
+
+-----------------------------------------------------------
+-- RESPAWN RESET
+-----------------------------------------------------------
+
+local function resetAll()
+	states.SlowMo = false
+	states.Ragdoll = false
+	states.NoClip = false
+	states.AirJump = false
+	states.Shield = false
+	states.Overdrive = false
+
+	noclipUp = false
+	noclipDown = false
+
+	setSlowVisual(false)
+	updateAllToggles()
+
+	task.wait(0.25)
+
+	refreshMovement()
+end
+
+player.CharacterAdded:Connect(function(char)
+	char:WaitForChild("HumanoidRootPart", 5) or char:WaitForChild("Torso", 5)
+	resetAll()
+end)
+
+if player.Character then
+	task.spawn(resetAll)
+end
